@@ -20,6 +20,14 @@ Code and data for our paper <a href="#">TFG: Unified Training-Free Guidance for 
 
 ## 👋 Overview
 
+ <p align="center">    
+    <br>    
+    <a href="https://github.com/YWolfeee/Training-Free-Guidance">    
+        <img src="https://github.com/YWolfeee/Training-Free-Guidance/blob/main/assets/figure.png" width="800"/>    
+    </a>       
+    <br>  
+<p>
+    
 Given an unconditional diffusion model and a predictor for a target property of interest (e.g., a classifier), the goal of training-free guidance is to generate samples with desirable target properties without additional training. This paper introduces a novel algorithmic framework encompassing existing methods as special cases, unifying the study of training-free guidance into the analysis of an algorithm-agnostic design space. Via theoretical and empirical investigation, we propose an efficient and effective hyper-parameter searching strategy that can be readily applied to any downstream task. We systematically benchmark across 7 diffusion models on 16 tasks with 40 targets, and improve performance by 8.5% on average. Our framework and benchmark offer a solid foundation for conditional generation in a training-free manner.
 
 
