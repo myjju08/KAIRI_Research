@@ -23,7 +23,7 @@ Code and data for our paper <a href="#">TFG: Unified Training-Free Guidance for 
  <p align="center">    
     <br>    
     <a href="https://github.com/YWolfeee/Training-Free-Guidance">    
-        <img src="https://github.com/YWolfeee/Training-Free-Guidance/blob/main/assets/figure.png" width="800"/>    
+        <img src="https://github.com/YWolfeee/Training-Free-Guidance/blob/main/assets/figure.png" width="500"/>    
     </a>       
     <br>  
 <p>
