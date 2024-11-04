@@ -1,19 +1,18 @@
 # TFG: Unified Training-Free Guidance for Diffusion Models
 
 <p align="center">
-Code and data for our paper <a href="#">TFG: Unified Training-Free Guidance for Diffusion Models</a>
-    </br>
-    </br>
+<!--     </br>
+    </br> -->
     <a href="https://www.python.org/">
         <img alt="Build" src="https://img.shields.io/badge/Python-3.9+-1f425f.svg?color=purple">
-    </a>
-    <a href="https://huggingface.co/docs/diffusers">
+    </a> <a href="https://huggingface.co/docs/diffusers">
         <img alt="Diffusers" src="https://img.shields.io/badge/Diffusers-0.26-blue">
-    </a>
-    <a>
+    </a> <a>
         <img alt="MIT" src="https://img.shields.io/badge/License-MIT-yellow">
     </a>
 </p>
+
+Code and data for our paper [TFG: Unified Training-Free Guidance for Diffusion Models](https://arxiv.org/abs/2409.15761).
 
 ## 📰 News
 * **[Oct. 30, 2024]**: We launch the first version of **TFG**. The current codebase supports all tasks mentioned in our paper, including label guidance, super resolution, gaussian deblur, fine-grained generation, audio declipping, guidance combinatin, style transfer, and molecule property guidance. More applications & models will be included in the future. 
