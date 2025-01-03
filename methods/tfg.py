@@ -18,15 +18,19 @@ class TFGGuidance(BaseGuidance):
     @torch.enable_grad()
     def tilde_get_guidance(self, x0, mc_eps, return_logp=False, **kwargs):
 
-        flat_x0 = (x0[None] + mc_eps) #.reshape(-1, *x0.shape[1:])
+        # flat_x0 = (x0[None] + mc_eps) #.reshape(-1, *x0.shape[1:])
+        # v_func = torch.vmap(partial(self.guider.get_guidance,
+        #                             return_logp=True, 
+        #                             check_grad=False,
+        #                             **kwargs))
+        # outs = v_func(flat_x0)
         
-        v_func = torch.vmap(partial(self.guider.get_guidance,
-                                    return_logp=True, 
-                                    check_grad=False,
-                                    **kwargs))
-        outs = v_func(flat_x0)
+        # avg_logprobs = torch.logsumexp(outs, dim=0) - math.log(mc_eps.shape[0])
         
-        avg_logprobs = torch.logsumexp(outs, dim=0) - math.log(mc_eps.shape[0])
+        flat_x0 = (x0[None] + mc_eps).reshape(-1, *x0.shape[1:])
+        outs = self.guider.get_guidance(flat_x0, return_logp=True, check_grad=False, **kwargs)
+
+        avg_logprobs = torch.logsumexp(outs.reshape(mc_eps.shape[0], x0.shape[0]), dim=0) - math.log(mc_eps.shape[0])
         
         if return_logp:
             return avg_logprobs
