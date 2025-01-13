@@ -1,9 +1,10 @@
 #!/bin/bash
 
-CUDA_VISIBLE_DEVICES="0 1 2 3"
+CUDA_VISIBLE_DEVICES="5 6"
 data_type=image
 image_size=256
-per_sample_batch_size=4
+per_sample_batch_size=16
+eval_batch_size=16
 dataset="cat"
 
 model_name_or_path='google/ddpm-ema-cat-256'
@@ -20,7 +21,7 @@ seed=42
 logging_resolution=512
 wandb=True
 wandb_project=sweep_$task
-metrics='lpips'
+metrics='neg_lpips'
 
 # These are just placeholders to be re-written by the sweep
 # wandb_project='trails'
@@ -39,17 +40,17 @@ rho_schedule='increase'
 mu_schedule='increase'
 sigma_schedule='decrease'
 
-sweep_dir='sweep_audio_diffusion_guidance'
+sweep_dir=sweep_$task
 cuda_ids=$CUDA_VISIBLE_DEVICES
 topk=3
 max_sweep=8
-init_rho=0.25
+init_rho=0.5
 max_rho=8
-init_mu=0.25
+init_mu=0.5
 max_mu=8
 init_sigma=0.01
 max_sigma=10
-init_guidance_strength=0.25
+init_guidance_strength=0.5
 max_guidance_strength=16
 beam_sample_size=32
 eval_batch_size=16
