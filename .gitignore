@@ -2,4 +2,6 @@
 .vscode/
 temp
 temp/
-
+wandb
+sweep_*
+__pycache__

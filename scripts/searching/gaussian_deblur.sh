@@ -3,7 +3,8 @@
 CUDA_VISIBLE_DEVICES="0 1 2 3"
 data_type=image
 image_size=256
-per_sample_batch_size=4
+per_sample_batch_size=16
+eval_batch_size=16
 dataset="cat"
 
 model_name_or_path='google/ddpm-ema-cat-256'
@@ -39,7 +40,7 @@ rho_schedule='increase'
 mu_schedule='increase'
 sigma_schedule='decrease'
 
-sweep_dir='sweep_audio_diffusion_guidance'
+sweep_dir='sweep_diffusion_guidance'
 cuda_ids=$CUDA_VISIBLE_DEVICES
 topk=3
 max_sweep=8
