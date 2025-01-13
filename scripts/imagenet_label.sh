@@ -25,6 +25,7 @@ rho=2
 mu=0.5
 sigma=0.1
 eps_bsz=1
+iter_steps=4
 
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --data_type $data_type \
@@ -37,6 +38,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --train_steps $train_steps \
     --inference_steps $inference_steps \
     --target $target \
+    --iter_steps $iter_steps \
     --eta $eta \
     --clip_x0 $clip_x0 \
     --rho $rho \

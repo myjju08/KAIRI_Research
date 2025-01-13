@@ -5,3 +5,4 @@ temp/
 wandb
 sweep_*
 __pycache__
+logs

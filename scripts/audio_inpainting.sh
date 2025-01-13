@@ -26,11 +26,13 @@ mu=2
 sigma=0.1
 eps_bsz=1
 guidance_strength=8.0
+iter_steps=4
 
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --data_type $data_type \
     --task $task \
     --image_size $image_size \
+    --iter_steps $iter_steps \
     --dataset $dataset \
     --guide_network $guide_network \
     --logging_resolution $logging_resolution \
