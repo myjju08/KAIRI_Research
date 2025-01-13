@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CUDA_VISIBLE_DEVICES="2"
+CUDA_VISIBLE_DEVICES="0 1 2 3"
 data_type=image
 image_size=256
 per_sample_batch_size=4
@@ -32,8 +32,6 @@ sigma=0.0
 # These are fixed hyperparameters for large scale running
 num_samples=256
 logging_dir='logs'
-filter_type='no'
-filter_rate=1.0
 eps_bsz=1
 
 # Fixed hyperparameters during the sweep
@@ -54,6 +52,7 @@ max_sigma=10
 init_guidance_strength=0.25
 max_guidance_strength=16
 beam_sample_size=32
+eval_batch_size=16
 num_large_scale=1
 
 echo "CUDA_VISIBLE_DEVICES=$cuda_ids"
@@ -85,8 +84,6 @@ do
             --data_type $data_type \
             --image_size $image_size \
             --wandb $wandb \
-            --filter_type $filter_type \
-            --filter_rate $filter_rate \
             --metrics $metrics \
             --iter_steps $iter_steps \
             --wandb_project $wandb_project \

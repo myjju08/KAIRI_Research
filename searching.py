@@ -237,14 +237,12 @@ if __name__ == '__main__':
     # save for large scale use
     real_num_samples = int(args['num_samples'])        
     real_logging_dir = args['logging_dir']
-    filter_type = args['filter_type']
-    print("Save large scale num_samples, logging dir, and filter type")
-    print(f"real_num_samples: {real_num_samples}, real_logging_dir: {real_logging_dir}, filter_type: {filter_type}")
+    print("Save large scale num_samples, logging dir")
+    print(f"real_num_samples: {real_num_samples}, real_logging_dir: {real_logging_dir}")
 
     # add globally invariant parameters into args
     args['num_samples'] = int(sweep_args.beam_sample_size)
     args['logging_dir'] = sweep_args.sweep_dir
-    args['filter_type'] = 'none'
     print("Default arguments", args)
 
     logging_dir = os.path.join(*get_logging_dir(args).split("/")[:-1])
@@ -268,7 +266,6 @@ if __name__ == '__main__':
     for args in args_list:
         args['num_samples'] = real_num_samples
         args['logging_dir'] = real_logging_dir
-        args['filter_type'] = filter_type
 
     print(f"Running large scale experiments for the top {sweep_args.num_large_scale} settings")
     results = Search.run_candidates(args_list)
