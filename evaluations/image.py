@@ -165,7 +165,7 @@ class ImageEvaluator(BaseEvaluator):
             diff = (image_embed - target_embed).reshape(image_embed.size(0), -1)
             similarity_list.append(-(diff ** 2).sum(dim=1).sqrt() / 10)
 
-        return torch.cat(similarity_list, dim=0).mean().item()
+        return torch.cat(similarity_list, dim=0).mean().item() / 10.0
 
     @torch.no_grad()
     def _compute_fid(self, samples, dataset, target):
