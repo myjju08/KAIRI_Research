@@ -60,9 +60,7 @@ class ImageLabelGuidance:
         if check_grad:
             check_grad_fn(x_need_grad)
 
-        x_need_grad = func(x_need_grad)
-
-        x = post_process(x_need_grad)
+        x = post_process(func(x_need_grad))
         
         # classifier returns log prob!
         log_probs = self.classifier(x)
