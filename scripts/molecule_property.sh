@@ -26,7 +26,7 @@ guidance_strength=0.1
 rho=0.001
 mu=0.002
 sigma=0.1
-
+eps_bsz=1
 # These are fixed hyperparameters for large scale running
 num_samples=32
 logging_dir='logs'
@@ -57,6 +57,7 @@ do
         --args_generators_path $args_generators_path \
         --energy_path $energy_path \
         --task $task \
+        --eps_bsz $eps_bsz \
         --args_energy_path $args_energy_path \
         --classifiers_path $classifiers_path \
         --args_classifiers_path $args_classifiers_path \
