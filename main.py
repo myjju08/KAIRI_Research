@@ -17,7 +17,7 @@ if __name__ == '__main__':
     bon_guider = None
     if hasattr(args, 'bon_guidance') and args.bon_guidance:
         bon_args = deepcopy(args)
-        bon_args.guide_networks = [args.bon_guidance]
+        bon_args.guide_networks = args.bon_guidance.split('+')
         bon_guider = get_guidance(bon_args, network)
     
     # evaluator for generated samples
