@@ -2,6 +2,7 @@ from utils.utils import get_config, get_evaluator, get_guidance, get_network
 from pipeline import BasePipeline
 import torch
 import logger
+from copy import deepcopy
 
 if __name__ == '__main__':
     # Please tsee utils/config.py for the complete argument lists
@@ -12,13 +13,20 @@ if __name__ == '__main__':
     network = get_network(args)
     # guidance method encoded by prediction model
     guider = get_guidance(args, network)
+    
+    bon_guider = None
+    if hasattr(args, 'bon_guidance') and args.bon_guidance:
+        bon_args = deepcopy(args)
+        bon_args.guide_networks = [args.bon_guidance]
+        bon_guider = get_guidance(bon_args, network)
+    
     # evaluator for generated samples
     try:
         evaluator = get_evaluator(args)
     except NotImplementedError:
         evaluator = None
 
-    pipeline = BasePipeline(args, network, guider, evaluator)
+    pipeline = BasePipeline(args, network, guider, evaluator, bon_guider=bon_guider)
 
     samples = pipeline.sample(args.num_samples)
     logger.log_samples(samples)

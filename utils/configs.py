@@ -98,4 +98,5 @@ class Arguments:
     
     # bon
     bon_rate: float = field(default=1)
+    bon_guidance: str = field(default=None)
 

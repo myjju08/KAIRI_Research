@@ -14,7 +14,8 @@ class BasePipeline(object):
                  args: Arguments, 
                  network: BaseSampler, 
                  guider: BaseGuidance, 
-                 evaluator: BaseEvaluator):
+                 evaluator: BaseEvaluator,
+                 bon_guider=None):
         self.network = network
         self.guider = guider
         self.evaluator = evaluator
@@ -23,6 +24,9 @@ class BasePipeline(object):
         
         self.bon_rate = args.bon_rate
         self.batch_size = args.eval_batch_size
+        
+        # 初始化 logp_guider，如果没有提供则使用默认的 guider
+        self.bon_guider = bon_guider if bon_guider is not None else self.guider
         
     @abstractmethod
     def sample(self, sample_size: int):
@@ -38,7 +42,7 @@ class BasePipeline(object):
             logp_list = []
             for i in range(0, samples.shape[0], guidance_batch_size):
                 batch_samples = samples[i:i + guidance_batch_size]
-                batch_logp = self.guider.guider.get_guidance(batch_samples, return_logp=True, check_grad=False)
+                batch_logp = self.bon_guider.guider.get_guidance(batch_samples, return_logp=True, check_grad=False)
                 logp_list.append(batch_logp)
 
             logp = torch.cat(logp_list, dim=0).view(-1)
