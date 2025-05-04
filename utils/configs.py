@@ -95,4 +95,7 @@ class Arguments:
     topk: int = field(default=5)
     output_path: str = field(default='vis_molecule')
     max_n_samples: int = field(default=10000000000)
+    
+    # bon
+    bon_rate: float = field(default=1)
 

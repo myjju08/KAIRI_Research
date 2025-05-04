@@ -39,6 +39,7 @@ def get_logging_dir(arg_dict: dict):
         "model=" + arg_dict['model_name_or_path'].replace("/", '_'),
         "guide_net=" + arg_dict['guide_network'].replace('/', '_'),
         "target=" + str(arg_dict['target']).replace(" ", "_"),
+        "bon=" + str(arg_dict['bon_rate']),
         suffix,
     )
 

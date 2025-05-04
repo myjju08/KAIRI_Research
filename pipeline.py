@@ -1,3 +1,4 @@
+import torch
 import os
 import numpy as np
 import PIL.Image as Image
@@ -19,16 +20,37 @@ class BasePipeline(object):
         self.evaluator = evaluator
         self.logging_dir = args.logging_dir
         self.check_done = args.check_done
-
+        
+        self.bon_rate = args.bon_rate
+        self.batch_size = args.eval_batch_size
+        
     @abstractmethod
     def sample(self, sample_size: int):
         
         samples = self.check_done_and_load_sample()
         
         if samples is None:
-            samples = self.network.sample(sample_size=sample_size, guidance=self.guider)
+
+            guidance_batch_size = self.batch_size  
+
+            samples = self.network.sample(sample_size=sample_size * self.bon_rate, guidance=self.guider)
+
+            logp_list = []
+            for i in range(0, samples.shape[0], guidance_batch_size):
+                batch_samples = samples[i:i + guidance_batch_size]
+                batch_logp = self.guider.guider.get_guidance(batch_samples, return_logp=True, check_grad=False)
+                logp_list.append(batch_logp)
+
+            logp = torch.cat(logp_list, dim=0).view(-1)
+
+            samples = samples.view(sample_size, int(self.bon_rate), *samples.shape[1:])
+            logp = logp.view(sample_size, int(self.bon_rate))
+
+            idx = logp.argmax(dim=1)
+            samples = samples[torch.arange(sample_size), idx]
+
             samples = self.network.tensor_to_obj(samples)
-        
+                    
         return samples
     
     def evaluate(self, samples):
