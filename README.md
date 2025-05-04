@@ -15,6 +15,7 @@
 Code and data for our paper [TFG: Unified Training-Free Guidance for Diffusion Models](https://arxiv.org/abs/2409.15761).
 
 ## 📰 News
+* **[May. 4, 2025]**: We incorporate a Best-of-N feature in `pipeline.py` to better support the inference-time scaling study. You can adjust the `bon_rate` (default=1) to use different "N" in your Best-of-N sampling strategy.
 * **[Oct. 30, 2024]**: We launch the first version of **TFG**. The current codebase supports all tasks mentioned in our paper, including label guidance, super resolution, gaussian deblur, fine-grained generation, audio declipping, guidance combinatin, style transfer, and molecule property guidance. More applications & models will be included in the future. 
 
 ## 👋 Overview
