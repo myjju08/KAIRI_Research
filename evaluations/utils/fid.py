@@ -51,6 +51,7 @@ except ImportError:
 from .inception import InceptionV3
 from .torch_sqrtm import sqrtm, torch_matmul_to_array, np_to_gpu_tensor
 
+from utils.env_utils import *
 
 class ImagePILDataset(torch.utils.data.Dataset):
     def __init__(self, images, transforms=None):
@@ -199,17 +200,66 @@ def compute_statistics(images, model, batch_size, dims, device,
     return m, s
 
 
-def calculate_fid(ref, test, batch_size, device, dims=2048, num_workers=1):
+def calculate_fid(ref, test, batch_size, device, dims=2048, num_workers=1, cache_path=None):
+    """
+    Calculates the Frechet Inception Distance (FID) between two sets of images.
 
+    Args:
+        ref: Path to the directory of reference images or a PyTorch DataLoader/Generator for reference images.
+        test: Path to the directory of test images or a PyTorch DataLoader/Generator for test images.
+        batch_size (int): Batch size to use for processing images.
+        device (torch.device or str): Device to use for computation (e.g., 'cuda', 'cpu').
+        dims (int): Dimensionality of Inception features to use. Default is 2048.
+        num_workers (int): Number of worker processes to use for data loading. Default is 1.
+        cache_path (str, optional): Path to a .pt file to cache/load pre-computed
+                                    statistics for the reference dataset. If None,
+                                    statistics are always recomputed. If the file
+                                    exists, statistics are loaded. If loading fails
+                                    or the file doesn't exist, statistics are computed
+                                    and saved to this path. Default is None.
+
+    Returns:
+        float: The calculated FID score.
+    """
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
-
     model = InceptionV3([block_idx]).to(device)
+    model.eval() # Ensure model is in evaluation mode
 
-    m1, s1 = compute_statistics(ref, model, batch_size,
-                                        dims, device, num_workers)
+    m1, s1 = None, None
+    if cache_path is not None:
+        try:
+            print(f"Attempting to load cached reference statistics from: {cache_path}")
+            m1, s1 = torch.load(cache_path, map_location=device)
+            print("Successfully loaded cached reference statistics.")
+        except FileNotFoundError:
+            print(f"Cache file not found: {cache_path}. Computing reference statistics.")
+            m1, s1 = compute_statistics(ref, model, batch_size, dims, device, num_workers)
+            try:
+                print(f"Saving computed reference statistics to: {cache_path}")
+                torch.save((m1, s1), cache_path)
+                print("Successfully saved reference statistics to cache.")
+            except Exception as e:
+                print(f"Warning: Could not save reference statistics to cache: {cache_path}. Error: {e}")
+        except Exception as e:
+            print(f"Failed to load cached reference statistics from: {cache_path}. Error: {e}")
+            print("Recomputing reference statistics.")
+            m1, s1 = compute_statistics(ref, model, batch_size, dims, device, num_workers)
+            try:
+                print(f"Saving recomputed reference statistics to: {cache_path}")
+                torch.save((m1, s1), cache_path)
+                print("Successfully saved recomputed reference statistics to cache.")
+            except Exception as e_save:
+                print(f"Warning: Could not save recomputed reference statistics to cache: {cache_path}. Error: {e_save}")
+    else:
+        print("No cache path provided. Computing reference statistics.")
+        m1, s1 = compute_statistics(ref, model, batch_size, dims, device, num_workers)
+
+    print("Computing test statistics.")
     m2, s2 = compute_statistics(test, model, batch_size,
-                                        dims, device, num_workers)
-    fid_value = calculate_frechet_distance(m1, s1, m2, s2, device)
+                                dims, device, num_workers)
+
+    print("Calculating FID value.")
+    fid_value = calculate_frechet_distance(m1, s1, m2, s2, device=device) # Removed device argument if not used by actual function
 
     return fid_value
 

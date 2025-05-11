@@ -1,8 +1,11 @@
-IMAGENET_PATH="./data/imagenet-1k/train"
+IMAGENET_PATH="/nfs-shared/haowei/sharing/imagenet-1k"
+IMAGENET_STATISTICS_PATH={
+    str(label): f"/nfs-shared/haowei/sharing/imagenet-1k-fid-stats-{label}.pt" for label in [111, 222, 333, 444]
+}
 CELEBA_PATH="./data/celeba_hq_256"
 PARTIPROMPOTS_PATH="./data/partiprompts_1000.txt"
 WIKIART_PATH='./data/wikiart'
-MODEL_PATH='/nfs-shared/haowei/sharing/models'    # Your model path
+MODEL_PATH='/nfs-shared/haowei/sharing'    # Your model path
 COND_VALIDITY_PATH_MAPPING = {
     'google/vit-base-patch16-224': "facebook/deit-small-patch16-224",
     "facebook/deit-small-patch16-224": 'google/vit-base-patch16-224',

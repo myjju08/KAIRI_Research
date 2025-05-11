@@ -168,11 +168,14 @@ class ImageEvaluator(BaseEvaluator):
         return torch.cat(similarity_list, dim=0).mean().item() / 10.0
 
     @torch.no_grad()
-    def _compute_fid(self, samples, dataset, target):
+    def _compute_fid(self, samples, dataset, target, cache_path=None):
+        try:
+            ref_images = load_image_dataset(dataset, num_samples=-1, target=target, return_tensor=False)
+        except:
+            logger.log('load reference images failed.')
+            ref_images = None
 
-        ref_images = load_image_dataset(dataset, num_samples=-1, target=target, return_tensor=False)
-
-        fid = calculate_fid(ref_images, samples, self.args.eval_batch_size, self.args.device)
+        fid = calculate_fid(ref_images, samples, self.args.eval_batch_size, self.args.device, cache_path=cache_path)
 
         return fid
     
@@ -189,7 +192,9 @@ class ImageEvaluator(BaseEvaluator):
 
         # we only allow combined guidance within the same dataset
         if self.args.dataset in ['imagenet', 'cifar10', 'cat']:
-            fid = self._compute_fid(samples, self.args.dataset, self.args.targets)
+            if self.args.dataset == 'imagenet':
+                cache_path = IMAGENET_STATISTICS_PATH['+'.join([str(x) for x in self.args.targets])]
+            fid = self._compute_fid(samples, self.args.dataset, self.args.targets, cache_path=cache_path)
             metrics['fid'] = fid
         
         if self.args.dataset in ['celebahq']:

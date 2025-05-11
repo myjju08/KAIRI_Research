@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from PIL import Image
-from datasets import load_dataset, concatenate_datasets, load_from_disk
+from datasets import load_dataset, concatenate_datasets, load_from_disk, DatasetDict
 from torchvision import transforms
 from diffusers import AudioDiffusionPipeline
 from torchvision.transforms.functional import to_tensor
@@ -86,6 +86,8 @@ def load_image_dataset(dataset, num_samples=-1, target=-1, return_tensor=True, n
     
     elif dataset == 'imagenet':
         dataset = load_from_disk(IMAGENET_PATH)
+        if isinstance(dataset, DatasetDict):
+            dataset = dataset['train']
 
         if target != -1:
             dataset = dataset.filter(lambda x: x in [int(tar) for tar in target], input_columns='label')
