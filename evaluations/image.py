@@ -192,6 +192,7 @@ class ImageEvaluator(BaseEvaluator):
 
         # we only allow combined guidance within the same dataset
         if self.args.dataset in ['imagenet', 'cifar10', 'cat']:
+            cache_path = None
             if self.args.dataset == 'imagenet':
                 cache_path = IMAGENET_STATISTICS_PATH['+'.join([str(x) for x in self.args.targets])]
             fid = self._compute_fid(samples, self.args.dataset, self.args.targets, cache_path=cache_path)

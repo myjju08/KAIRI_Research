@@ -72,4 +72,3 @@ class BasePipeline(object):
             return logger.load_samples()
 
         return None
-

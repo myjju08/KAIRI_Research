@@ -1,13 +1,13 @@
 datasets==2.19.0
 diffusers==0.30.0
-numpy
-scipy==1.8.0
+numpy==1.23.5
+scipy>=1.11.0
 torch==2.1.0
 torchvision==0.16.0
 transformers==4.36.2
 wandb==0.13.3
 torchmetrics==1.4.1
-matplotlib==3.3.1
+matplotlib>=3.4,<3.5
 librosa==0.10.2
 laion_clap==1.1.6
 encodec
