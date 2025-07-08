@@ -6,3 +6,6 @@ wandb
 sweep_*
 __pycache__
 logscheckpoints/
+*.pt
+*.pkl
+*.bin
