@@ -2,7 +2,7 @@ CUDA_VISIBLE_DEVICES=0
 data_type=image
 image_size=256
 dataset="imagenet"
-model_name_or_path='models/openai_imagenet.pt'
+model_name_or_path='openai_imagenet.pt'
 
 task=label_guidance
 guide_network='google/vit-base-patch16-224'

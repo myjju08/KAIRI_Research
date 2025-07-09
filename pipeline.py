@@ -51,7 +51,9 @@ class BasePipeline(object):
             logp = logp.view(sample_size, int(self.bon_rate))
 
             idx = logp.argmax(dim=1)
-            samples = samples[torch.arange(sample_size), idx]
+            arange_idx = torch.arange(sample_size, device=samples.device)
+            idx = idx.to(samples.device)
+            samples = samples[arange_idx, idx]
 
             samples = self.network.tensor_to_obj(samples)
                     

@@ -39,7 +39,13 @@ class BaseGuider:
 
     @torch.enable_grad()
     def process(self, x):
-        return self.processor(x)
+        if self.args.data_type == 'text2image':
+            if hasattr(x, "shape") and x.shape[1] == 4:
+                return self.processor(x)
+            else:
+                return x
+        else:
+            return x
 
     @torch.no_grad()
     def load_guider(self):
