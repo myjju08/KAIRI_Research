@@ -5,7 +5,7 @@ IMAGENET_STATISTICS_PATH={
 CELEBA_PATH="./data/celeba_hq_256"
 PARTIPROMPOTS_PATH="./data/partiprompts_1000.txt"
 WIKIART_PATH='./data/wikiart'
-MODEL_PATH='/home/juhyeong/Training-Free-Guidance/checkpoints'    # Your model path
+MODEL_PATH='/home/juhyeong/Training-Free-Guidance/models'    # Your model path
 COND_VALIDITY_PATH_MAPPING = {
     'google/vit-base-patch16-224': "facebook/deit-small-patch16-224",
     "facebook/deit-small-patch16-224": 'google/vit-base-patch16-224',
