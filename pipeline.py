@@ -37,23 +37,29 @@ class BasePipeline(object):
 
             guidance_batch_size = self.batch_size  
 
-            samples = self.network.sample(sample_size=sample_size * self.bon_rate, guidance=self.guider)
+            # For DiT models, we need to handle the case where bon_rate=1
+            if self.bon_rate == 1:
+                # Direct sampling without multiple candidates
+                samples = self.network.sample(sample_size=sample_size, guidance=self.guider)
+            else:
+                # Original logic for multiple candidates
+                samples = self.network.sample(sample_size=sample_size * self.bon_rate, guidance=self.guider)
 
-            logp_list = []
-            for i in range(0, samples.shape[0], guidance_batch_size):
-                batch_samples = samples[i:i + guidance_batch_size]
-                batch_logp = self.bon_guider.guider.get_guidance(batch_samples, return_logp=True, check_grad=False)
-                logp_list.append(batch_logp)
+                logp_list = []
+                for i in range(0, samples.shape[0], guidance_batch_size):
+                    batch_samples = samples[i:i + guidance_batch_size]
+                    batch_logp = self.bon_guider.guider.get_guidance(batch_samples, return_logp=True, check_grad=False)
+                    logp_list.append(batch_logp)
 
-            logp = torch.cat(logp_list, dim=0).view(-1)
+                logp = torch.cat(logp_list, dim=0).view(-1)
 
-            samples = samples.view(sample_size, int(self.bon_rate), *samples.shape[1:])
-            logp = logp.view(sample_size, int(self.bon_rate))
+                samples = samples.view(sample_size, int(self.bon_rate), *samples.shape[1:])
+                logp = logp.view(sample_size, int(self.bon_rate))
 
-            idx = logp.argmax(dim=1)
-            arange_idx = torch.arange(sample_size, device=samples.device)
-            idx = idx.to(samples.device)
-            samples = samples[arange_idx, idx]
+                idx = logp.argmax(dim=1)
+                arange_idx = torch.arange(sample_size, device=samples.device)
+                idx = idx.to(samples.device)
+                samples = samples[arange_idx, idx]
 
             samples = self.network.tensor_to_obj(samples)
                     

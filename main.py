@@ -34,6 +34,6 @@ if __name__ == '__main__':
     # release torch occupied gpu memory
     torch.cuda.empty_cache()
     
-    metrics = evaluator.evaluate(samples)
-    if metrics is not None: # avoid rewriting metrics to json
-        logger.log_metrics(metrics, save_json=True)
+    #metrics = evaluator.evaluate(samples)
+    #if metrics is not None: # avoid rewriting metrics to json
+    #    logger.log_metrics(metrics, save_json=True)

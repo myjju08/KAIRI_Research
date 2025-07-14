@@ -1,11 +1,16 @@
 import functools
 import math
+from pickle import NONE
 import torch
+import os
 from torchvision.transforms.functional import to_tensor
 from PIL import Image
 from tqdm import tqdm
 from typing import List, Any, Union, Tuple
 import numpy as np
+
+# Define MODEL_PATH for DiT checkpoints
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'models')
 
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -28,15 +33,30 @@ class ImageSampler(BaseSampler):
     def __init__(self, args: Arguments):
 
         super(ImageSampler, self).__init__(args)
-        self.object_size = (3, args.image_size, args.image_size)
+        
+        # For DiT-XL/2 with VAE, input is latent space (4, 32, 32)
+        if 'transformer' in args.model_name_or_path:
+            latent_size = args.image_size // 8  # 256 // 8 = 32
+            self.object_size = (4, latent_size, latent_size)  # 4 channels for latent space
+            self.use_vae = True
+        else:
+            self.object_size = (3, args.image_size, args.image_size)  # 3 channels for RGB
+            self.use_vae = False
+            
         self.inference_steps = args.inference_steps
         self.eta = args.eta
         self.log_traj = args.log_traj
-        self.generator = torch.manual_seed(self.seed)
+        self.generator = torch.Generator(device=self.device).manual_seed(self.seed)
         self.target = args.target
+        
+        # Add class labels for DiT (None for unconditional generation)
+        # Use diverse class labels like DiT official code
+        self.class_labels = torch.tensor([1], device=self.device) # 여기에 class 정보 입력하면 됨
 
-        # FIXME: need to send batch_id to guider
         self.args = args
+        
+
+        
         # prepare unet, prev_t, alpha_prod, alpha_prod_prev...
         self._build_diffusion(args)
 
@@ -47,10 +67,45 @@ class ImageSampler(BaseSampler):
         '''
         if 'openai' in args.model_name_or_path:
             from .unet.openai import get_diffusion
+            self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
+        elif 'transformer' in args.model_name_or_path:
+            # Use DiT official style: create_diffusion + separate VAE
+            from .transformer.openai import create_diffusion, DiT_models
+            from diffusers.models import AutoencoderKL
+            
+            # 1. Create DiT model exactly like DiT official code
+            latent_size = args.image_size // 8
+            self.model = DiT_models['DiT-XL/2'](
+                input_size=latent_size,
+                num_classes=1000
+            ).to(args.device)
+            
+            # 2. Load checkpoint
+            checkpoint_path = os.path.join(MODEL_PATH, args.model_name_or_path)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+            
+            checkpoint = torch.load(checkpoint_path)
+            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
+            
+            self.model.load_state_dict(state_dict)
+            self.model.eval()
+            
+            # 3. Create diffusion object exactly like DiT official code
+            self.diffusion = create_diffusion(str(args.inference_steps))
+            
+            # 4. Create VAE exactly like DiT official code
+            vae_type = getattr(args, 'vae', 'mse')
+            self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{vae_type}").to(args.device)
+            
         else: 
             from .unet.huggingface import get_diffusion
+            self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
         
-        self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
+        
     
 
     @torch.no_grad()
@@ -63,25 +118,55 @@ class ImageSampler(BaseSampler):
             
             self.args.batch_id = batch_id
 
-            x = randn_tensor(
-                shape=(self.per_sample_batch_size, *self.object_size),
-                generator=self.generator,
-                device=self.device,
-            )
+            # DiT official code style sampling
+            if hasattr(self, 'model') and hasattr(self, 'diffusion') and hasattr(self, 'vae'):
+                # Use DiT official sampling exactly
+                n = min(sample_size, len(self.class_labels))  # Use sample_size instead of fixed length
+                z = torch.randn(n, 4, self.object_size[1], self.object_size[2], device=self.device)
+                y = self.class_labels[:n]  # Take only the first n class labels
 
-            for t in tqdm(range(self.inference_steps), total=self.inference_steps):
+                # Setup classifier-free guidance exactly like DiT
+                z = torch.cat([z, z], 0)
+                y_null = torch.tensor([1000] * n, device=self.device)
+                y = torch.cat([y, y_null], 0)
+                model_kwargs = dict(y=y, cfg_scale=4.0)
+
+                # Sample images using DiT's p_sample_loop
+                samples = self.diffusion.p_sample_loop(
+                    self.model.forward_with_cfg, 
+                    z.shape, 
+                    z, 
+                    clip_denoised=False, 
+                    model_kwargs=model_kwargs, 
+                    progress=True, 
+                    device=self.device
+                )
+                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
                 
-                x = guidance.guide_step(
-                    x, t, self.unet,
-                    self.ts,
-                    self.alpha_prod_ts, 
-                    self.alpha_prod_t_prevs,
-                    self.eta,
+                # VAE decode exactly like DiT
+                x = self.vae.decode(samples / 0.18215).sample
+                
+            else:
+                # Fallback to original method (for non-DiT models)
+                x = randn_tensor(
+                    shape=(self.per_sample_batch_size, *self.object_size),
+                    generator=self.generator,
+                    device=self.device,
                 )
 
-                # we may want to log some trajs
-                if self.log_traj:
-                    logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')
+                for t in tqdm(range(self.inference_steps), total=self.inference_steps):
+                    
+                    x = guidance.guide_step(
+                        x, t, self.unet,
+                        self.ts,
+                        self.alpha_prod_ts, 
+                        self.alpha_prod_t_prevs,
+                        self.eta,
+                    )
+
+                    # we may want to log some trajs
+                    if self.log_traj:
+                        logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')
 
             tot_samples.append(x)
         
@@ -89,17 +174,34 @@ class ImageSampler(BaseSampler):
         
     @staticmethod
     def tensor_to_obj(x):
-
-        images = (x / 2 + 0.5).clamp(0, 1)
+        # DiT VAE decode output is already in [-1, 1] range
+        # Convert to [0, 1] range for PIL image conversion
+        images = (x + 1) / 2.0  # Convert from [-1, 1] to [0, 1]
+        images = images.clamp(0, 1)
+        
+        # Move to CPU and convert to numpy
         images = images.cpu().permute(0, 2, 3, 1).numpy()
         
+        # Ensure proper shape
         if images.ndim == 3:
             images = images[None, ...]
+        
+        # Convert to uint8 for PIL
         images = (images * 255).round().astype("uint8")
-        if images.shape[-1] == 1:
-            pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
-        else:
-            pil_images = [Image.fromarray(image) for image in images]
+        
+        # Convert to PIL images
+        pil_images = []
+        for image in images:
+            if image.shape[-1] == 1:
+                # Grayscale image
+                pil_image = Image.fromarray(image.squeeze(), mode="L")
+            elif image.shape[-1] == 3:
+                # RGB image
+                pil_image = Image.fromarray(image, mode="RGB")
+            else:
+                # RGBA or other format
+                pil_image = Image.fromarray(image)
+            pil_images.append(pil_image)
         
         return pil_images
 

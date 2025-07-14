@@ -36,6 +36,9 @@ class Arguments:
     # model related
     model_name_or_path: str = field(default='google/ddpm-cifar10-32')
 
+    # VAE related (same as DiT)
+    vae: str = field(default='mse')  # 'mse' or 'ema', same as DiT
+
     # diffusion related
     train_steps: int = field(default=1000)
     inference_steps: int = field(default=50)

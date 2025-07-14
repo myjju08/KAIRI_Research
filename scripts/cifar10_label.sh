@@ -8,7 +8,7 @@ guide_network='resnet_cifar10.pt'
 train_steps=1000
 inference_steps=50
 eta=1.0
-target=8
+target=6
 clip_x0=True
 seed=42
 logging_dir='logs'
@@ -18,6 +18,7 @@ logging_resolution=512
 guidance_name='tfg'
 eval_batch_size=512
 wandb=False
+log_traj=False
 
 rho=1
 mu=0.25
@@ -49,6 +50,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --per_sample_batch_size $per_sample_batch_size \
     --num_samples $num_samples \
     --guidance_name $guidance_name \
-    --eval_batch_size $eval_batch_size
+    --eval_batch_size $eval_batch_size \
+    --log_traj $log_traj
 
 
