@@ -73,7 +73,7 @@ class Arguments:
     sigma_schedule: str = field(default='decrease')
 
     # cond_fn related
-    guide_network: str = field(default='aaraki/vit-base-patch16-224-in21k-finetuned-cifar10')
+    guide_network: str = field(default='google/vit-base-patch16-224')
     classifier_image_size: int = field(default=224)
     
     # evaluation related

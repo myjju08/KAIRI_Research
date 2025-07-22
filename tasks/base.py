@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
-import os
 from PIL import Image
 from torchvision import transforms
 from datasets import load_from_disk, load_dataset
-from diffusers import StableDiffusionPipeline
 from functools import partial
 import logger
+from diffusers import AutoencoderKL
 
 from .image_label_guidance import ImageLabelGuidance
 from .style_transfer_guidance import StyleTransferGuidance
@@ -20,45 +19,31 @@ class BaseGuider:
 
     def __init__(self, args):
         self.args = args
-        self.generator = torch.manual_seed(args.seed)
-        
-        self.load_processor()   # e.g., vae for latent diffusion
+        self.load_processor()   # vae for latent diffusion
         self.load_guider()      # guidance network
 
     def load_processor(self):
-        if self.args.data_type == 'text2image':
-            sd = StableDiffusionPipeline.from_pretrained(self.args.model_name_or_path)
-            self.vae = sd.vae
-            self.vae.eval()
-            self.vae.to(self.args.device)
-            for param in self.vae.parameters():
-                param.requires_grad = False
-            self.processor = lambda x: self.vae.decode(x / self.vae.config.scaling_factor, return_dict=False, generator=self.generator)[0]
-        else:
-            self.processor = lambda x: x
+        # 무조건 diffusers의 AutoencoderKL만 사용
+        self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(self.args.device)
+        self.vae.eval()
+        for p in self.vae.parameters():
+            p.requires_grad = False  # guidance gradient 계산에 필요 없음, 반드시 False로!
+        # 기존: self.processor = lambda x: self.vae.decode(x / 0.18215).sample
+        self.processor = lambda x: self.vae.decode(x / 0.18215, return_dict=False)[0]
 
     @torch.enable_grad()
     def process(self, x):
-        if self.args.data_type == 'text2image':
-            if hasattr(x, "shape") and x.shape[1] == 4:
-                return self.processor(x)
-            else:
-                return x
+        if hasattr(x, "shape") and x.shape[1] == 4:
+            return self.processor(x)
         else:
             return x
 
     @torch.no_grad()
     def load_guider(self):
-        
         self.get_guidance = None
-
-        # for combined guidance
         device = self.args.device
-
         guiders = []
-
         for task, guide_network, target in zip(self.args.tasks, self.args.guide_networks, self.args.targets):
-
             if task == 'style_transfer':
                 guider = StyleTransferGuidance(guide_network, target, device)
             elif task == 'label_guidance':
@@ -77,14 +62,11 @@ class BaseGuider:
                 guider = AduioInpaintingGuidance(self.args)
             else:
                 raise NotImplementedError
-            
             guiders.append(guider)
-        
         if len(guiders) == 1:
             self.get_guidance = partial(guider.get_guidance, post_process=self.process)
         else:
             self.get_guidance = partial(self._get_combined_guidance, guiders=guiders)
-
         if self.get_guidance is None:
             raise ValueError(f"Unknown guider: {self.args.guider}")
     

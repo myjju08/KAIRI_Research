@@ -131,7 +131,10 @@ class TFGGuidance(BaseGuidance):
         else:
             t_tensor = t
         # DiT-style: Get model prediction (epsilon or x0)
-        model_kwargs = dict(y=class_labels) if class_labels is not None else {}
+        # class_labels가 None이면 1000(unconditional)으로 변환
+        if class_labels is None:
+            class_labels = torch.tensor([1000], device=x.device)
+        model_kwargs = dict(y=class_labels)
         model_output = transformer(x, t_tensor, **model_kwargs)
         # DiT with learn_sigma=True outputs 8 channels (epsilon + sigma)
         if model_output.shape[1] == 8:

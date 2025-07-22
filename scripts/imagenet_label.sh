@@ -6,8 +6,8 @@ model_name_or_path='transformer_model.pt'
 
 # DiT-XL/2 specific settings
 task=label_guidance
-guide_network='google/vit-base-patch16-224'
-target=0
+guide_network='torchvision/resnet18'  # torchvision pretrained ResNet18 (256x256 지원)
+target=44
 
 # VAE settings (same as DiT)
 vae_type='mse'  # 'mse' or 'ema'
@@ -17,12 +17,12 @@ train_steps=1000
 inference_steps=100  # Reduced for faster inference
 eta=1.0
 clip_x0=True
-seed=42
+seed=44
 logging_dir='logs'
 per_sample_batch_size=1  # Reduced for DiT-XL/2 memory usage
-num_samples=2
+num_samples=1
 logging_resolution=256  # Match image_size
-guidance_name='tfg'
+guidance_name='dps'
 eval_batch_size=1  # Reduced for DiT-XL/2 memory usage
 wandb=False
 log_traj=False
@@ -30,12 +30,15 @@ log_traj=False
 # Training-Free-Guidance parameters
 #rho=2
 #mu=0.5
-#guidance 없이
 rho=0
 mu=0
-sigma=0.1
-eps_bsz=1
-iter_steps=4
+#sigma=0.1
+#eps_bsz=1
+#iter_steps=4
+sigma=0
+eps_bsz=0
+iter_steps=0
+guidance_strength=1.0  # DPS guidance strength 추가
 
 # DiT specific parameters
 learn_sigma=True  # DiT-XL/2 uses learn_sigma=True
@@ -60,6 +63,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --mu $mu \
     --sigma $sigma \
     --eps_bsz $eps_bsz \
+    --guidance_strength $guidance_strength \
     --wandb $wandb \
     --seed $seed \
     --logging_dir $logging_dir \

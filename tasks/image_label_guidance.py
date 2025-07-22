@@ -29,7 +29,10 @@ class ImageLabelGuidance:
             self.classifier = create_time_classifier(target=y, guide_network=self.guide_network)
         
         else: 
-            if 'resnet' in self.guide_network:
+            # HuggingFace 모델인지 확인 (슬래시가 포함된 경우)
+            if '/' in self.guide_network:
+                self.classifier = HuggingfaceClassifier(targets=y, guide_network=self.guide_network)
+            elif 'resnet' in self.guide_network and not self.guide_network.startswith('torchvision/'):
                 self.classifier = ResNet18(targets=y, guide_network=self.guide_network)
             else:
                 self.classifier = HuggingfaceClassifier(targets=y, guide_network=self.guide_network)

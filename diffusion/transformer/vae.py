@@ -21,14 +21,11 @@ class VAEProcessor:
         if vae_path and os.path.exists(vae_path):
             # Load custom VAE
             self.vae = torch.load(vae_path, map_location=self.device)
-            print(f'[VAE DEBUG] Loaded custom VAE from {vae_path}')
         else:
             # Load VAE exactly like DiT does
-            print(f'[VAE DEBUG] Loading DiT VAE: stabilityai/sd-vae-ft-{self.vae_type}')
             self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{self.vae_type}").to(self.device)
         
         self.vae.eval()
-        print('[VAE DEBUG] VAE loaded successfully')
         
     def encode(self, images):
         """
@@ -42,7 +39,7 @@ class VAEProcessor:
             self.load_vae()
         
         # DiT style: encode and scale by 0.18215
-        latents = self.vae.encode(images).latent_dist.sample()
+        latents = self.vae.encode(images).latent_dist.rsample()
         latents = latents * 0.18215  # DiT scaling factor
         return latents
     
@@ -65,12 +62,12 @@ class VAEProcessor:
         latents_scaled = latents / 0.18215  # DiT scaling factor
         
         if preserve_grad:
-            # For gradient computation
+            # For gradient computation (autograd ON)
             images = self.vae.decode(latents_scaled).sample
         else:
-            # For final output
+            # For final output (autograd OFF)
             with torch.no_grad():
-                images = self.vae.decode(latents_scaled).sample
+                images = self.vae.decode(latents_scaled, return_dict=False)[0]
         
         return images
 

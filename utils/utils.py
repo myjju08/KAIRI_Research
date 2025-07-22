@@ -99,6 +99,9 @@ def get_evaluator(args):
 
 def get_guidance(args, network):
     noise_fn = getattr(network, 'noise_fn', None)
+    # network에서 diffusion 객체 가져오기
+    diffusion = getattr(network, 'diffusion', None)
+    
     if args.guidance_name == 'no':
         return BaseGuidance(args, noise_fn=noise_fn)
     elif args.guidance_name == 'mpgd':
@@ -108,7 +111,7 @@ def get_guidance(args, network):
     elif args.guidance_name == 'freedom':
         return FreedomGuidance(args, noise_fn=noise_fn)
     elif args.guidance_name == 'dps':
-        return DPSGuidance(args, noise_fn=noise_fn)
+        return DPSGuidance(args, diffusion=diffusion, noise_fn=noise_fn)
     elif 'lgd' in args.guidance_name:
         return LGDGuidance(args, noise_fn=noise_fn)
     elif "tfg" in args.guidance_name:

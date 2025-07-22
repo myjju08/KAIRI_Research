@@ -5,18 +5,21 @@ import torch
 
 class BaseGuidance:
 
-    def __init__(self, args: Arguments, noise_fn: None):
+    def __init__(self, args: Arguments, custom_noise_fn=None, noise_fn=None):
 
         self.args = args
         self.guider = BaseGuider(args)
-        if noise_fn is None:
+        # Handle both custom_noise_fn and noise_fn parameters for backward compatibility
+        if noise_fn is not None:
+            self.noise_fn = noise_fn
+        elif custom_noise_fn is not None:
+            self.noise_fn = custom_noise_fn
+        else:
             self.generator = torch.manual_seed(self.args.seed)
-            def noise_fn (x, sigma, **kwargs):
+            def default_noise_fn (x, sigma, **kwargs):
                 noise =  randn_tensor(x.shape, generator=self.generator, device=self.args.device, dtype=x.dtype)
                 return sigma * noise + x
-            self.noise_fn = noise_fn
-        else:
-            self.noise_fn = noise_fn
+            self.noise_fn = default_noise_fn
 
     def guide_step(
         self,
@@ -60,11 +63,6 @@ class BaseGuidance:
         t: torch.LongTensor,
         **kwargs,
     ) -> torch.Tensor:
-        
-        '''
-            This function first compute (updated) eps from x_0, and then predicts x_{t-1} using Equation (12) in DDIM paper.
-        '''
-        
         new_epsilon = (
             (xt - alpha_prod_t ** (0.5) * x0) / (1 - alpha_prod_t) ** (0.5)
         )
@@ -82,11 +80,6 @@ class BaseGuidance:
         t: torch.LongTensor,
         **kwargs,
     ) -> torch.Tensor:
-        
-        '''
-            This function predicts x_{t-1} using Equation (12) in DDIM paper.
-        '''
-
         sigma = eta * (
             (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
         ) ** (0.5)
@@ -95,18 +88,20 @@ class BaseGuidance:
         pred_x0_direction = (xt - (1 - alpha_prod_t) ** (0.5) * eps) / (alpha_prod_t ** (0.5))
 
         # Equation (12) in DDIM sampling
-        prev_sample = alpha_prod_t_prev ** (0.5) * pred_x0_direction + pred_sample_direction
+        mean_pred = alpha_prod_t_prev ** (0.5) * pred_x0_direction + pred_sample_direction
 
-        if eta > 0 and t.item() > 0:
-            prev_sample = self.noise_fn(prev_sample, sigma, **kwargs)
-            # variance_noise = randn_tensor(
-            #     xt.shape, generator=self.generator, device=self.args.device, dtype=xt.dtype
-            # )
-            # variance = sigma * variance_noise
-
-            # prev_sample = prev_sample + variance
+        # Add noise following DiT's exact implementation
+        if eta > 0:
+            # Create nonzero_mask exactly like DiT
+            nonzero_mask = (
+                (t != 0).float().view(-1, *([1] * (len(xt.shape) - 1)))
+            )  # no noise when t == 0
+            
+            # Generate noise and add it
+            noise = torch.randn_like(xt)
+            mean_pred = mean_pred + nonzero_mask * sigma * noise
         
-        return prev_sample
+        return mean_pred
 
 
     def _predict_xt(
@@ -138,5 +133,3 @@ class BaseGuidance:
             pred_x0 = torch.clamp(pred_x0, -self.args.clip_sample_range, self.args.clip_sample_range)
         
         return pred_x0
-
-

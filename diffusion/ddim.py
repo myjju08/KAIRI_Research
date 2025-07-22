@@ -27,6 +27,8 @@ from tasks.networks.egnn.EDM import EDM
 from tasks.networks.egnn.EGNN import EGNN_dynamics_QM9
 from tasks.networks.egnn.utils import assert_correctly_masked, assert_mean_zero_with_mask
 
+from diffusion.transformer.vae import VAEProcessor
+
 
 class ImageSampler(BaseSampler):
 
@@ -48,10 +50,11 @@ class ImageSampler(BaseSampler):
         self.log_traj = args.log_traj
         self.generator = torch.Generator(device=self.device).manual_seed(self.seed)
         self.target = args.target
+        self.class_labels = torch.tensor([int(args.target)], device=self.device)
+
         
-        # Add class labels for DiT (None for unconditional generation)
-        # Use diverse class labels like DiT official code
-        self.class_labels = torch.tensor([1], device=self.device) # 여기에 class 정보 입력하면 됨
+        # CFG scale for classifier-free guidance (DiT default is 4.0)
+        self.cfg_scale = getattr(args, 'cfg_scale', 4.0)
 
         self.args = args
         
@@ -61,10 +64,6 @@ class ImageSampler(BaseSampler):
         self._build_diffusion(args)
 
     def _build_diffusion(self, args):
-        
-        '''
-            Different diffusion models should be registered here
-        '''
         if 'openai' in args.model_name_or_path:
             from .unet.openai import get_diffusion
             self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
@@ -75,12 +74,16 @@ class ImageSampler(BaseSampler):
             
             # 1. Create DiT model exactly like DiT official code
             latent_size = args.image_size // 8
+            # Use DiT-XL/2 (original model)
             self.model = DiT_models['DiT-XL/2'](
                 input_size=latent_size,
                 num_classes=1000
             ).to(args.device)
             
-            # 2. Load checkpoint
+            # 2. Initialize weights like DiT official code (BEFORE loading checkpoint)
+            self.model.initialize_weights()
+            
+            # 3. Load checkpoint
             checkpoint_path = os.path.join(MODEL_PATH, args.model_name_or_path)
             if not os.path.exists(checkpoint_path):
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -94,12 +97,22 @@ class ImageSampler(BaseSampler):
             self.model.load_state_dict(state_dict)
             self.model.eval()
             
-            # 3. Create diffusion object exactly like DiT official code
+            # 4. Create diffusion object exactly like DiT official code
             self.diffusion = create_diffusion(str(args.inference_steps))
             
-            # 4. Create VAE exactly like DiT official code
+            # 5. Create VAE exactly like DiT official code
             vae_type = getattr(args, 'vae', 'mse')
             self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{vae_type}").to(args.device)
+            
+            # 6. Extract diffusion schedule parameters from DiT diffusion object
+            self.ts = torch.arange(args.inference_steps, device=args.device)
+            # numpy 배열을 torch tensor로 변환
+            alphas_cumprod_tensor = torch.from_numpy(self.diffusion.alphas_cumprod).to(args.device)
+            self.alpha_prod_ts = alphas_cumprod_tensor[:args.inference_steps]
+            self.alpha_prod_t_prevs = torch.cat([
+                torch.tensor([1.0], device=args.device),
+                alphas_cumprod_tensor[:args.inference_steps-1]
+            ])
             
         else: 
             from .unet.huggingface import get_diffusion
@@ -119,19 +132,29 @@ class ImageSampler(BaseSampler):
             self.args.batch_id = batch_id
 
             # DiT official code style sampling
-            if hasattr(self, 'model') and hasattr(self, 'diffusion') and hasattr(self, 'vae'):
+            if False:
                 # Use DiT official sampling exactly
-                n = min(sample_size, len(self.class_labels))  # Use sample_size instead of fixed length
+                n = min(self.per_sample_batch_size, len(self.class_labels))  # Use per_sample_batch_size
                 z = torch.randn(n, 4, self.object_size[1], self.object_size[2], device=self.device)
-                y = self.class_labels[:n]  # Take only the first n class labels
+                
+                # Use target class for conditional generation
+                if hasattr(self.args, 'target') and self.args.target is not None:
+                    # Convert target to integer if it's a string
+                    if isinstance(self.args.target, str):
+                        target_value = int(self.args.target)
+                    else:
+                        target_value = self.args.target
+                    y = torch.tensor([target_value] * n, device=self.device)
+                else:
+                    y = self.class_labels[:n]  # Fallback to class_labels
 
                 # Setup classifier-free guidance exactly like DiT
                 z = torch.cat([z, z], 0)
                 y_null = torch.tensor([1000] * n, device=self.device)
                 y = torch.cat([y, y_null], 0)
-                model_kwargs = dict(y=y, cfg_scale=4.0)
+                model_kwargs = dict(y=y, cfg_scale=self.cfg_scale)
 
-                # Sample images using DiT's p_sample_loop
+                # Sample images using DiT's ddim_sample_loop with eta parameter
                 samples = self.diffusion.p_sample_loop(
                     self.model.forward_with_cfg, 
                     z.shape, 
@@ -144,32 +167,59 @@ class ImageSampler(BaseSampler):
                 samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
                 
                 # VAE decode exactly like DiT
-                x = self.vae.decode(samples / 0.18215).sample
+                x = self.vae.decode(samples / 0.18215, return_dict=False)[0]
                 
             else:
-                # Fallback to original method (for non-DiT models)
-                x = randn_tensor(
-                    shape=(self.per_sample_batch_size, *self.object_size),
-                    generator=self.generator,
-                    device=self.device,
-                )
+                n = min(self.per_sample_batch_size, len(self.class_labels))  # Use per_sample_batch_size
+                z = torch.randn(n, 4, self.object_size[1], self.object_size[2], device=self.device)
+                
+                # Use target class for conditional generation
+                if hasattr(self.args, 'target') and self.args.target is not None:
+                    # Convert target to integer if it's a string
+                    if isinstance(self.args.target, str):
+                        target_value = int(self.args.target)
+                    else:
+                        target_value = self.args.target
+                    y = torch.tensor([target_value] * n, device=self.device)
+                else:
+                    y = self.class_labels[:n]  # Fallback to class_labels
 
-                for t in tqdm(range(self.inference_steps), total=self.inference_steps):
-                    
-                    x = guidance.guide_step(
-                        x, t, self.unet,
-                        self.ts,
-                        self.alpha_prod_ts, 
-                        self.alpha_prod_t_prevs,
-                        self.eta,
-                    )
+                # Setup classifier-free guidance exactly like DiT
+                z = torch.cat([z, z], 0)
+                y_null = torch.tensor([1000] * n, device=self.device)
+                y = torch.cat([y_null, y_null], 0)
+                model_kwargs = dict(y=y, cfg_scale=self.cfg_scale)
 
-                    # we may want to log some trajs
-                    if self.log_traj:
-                        logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')
+                if self.device is None:
+                    self.device = next(self.model.parameters()).device
+            
+                indices = list(range(self.diffusion.num_timesteps))[::-1]
 
-            tot_samples.append(x)
-        
+                indices = tqdm(indices)
+                x = z
+                for i in indices:
+                    t = torch.tensor([i] * x.shape[0], device=self.device)
+                    # DPS guidance에 VAE 전달
+                    if hasattr(guidance, 'vae') and guidance.vae is None:
+                        guidance.vae = self.vae
+                    # guide_step만 gradient 켜기
+                    with torch.enable_grad():
+                        out = guidance.guide_step( x, t, self.model, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs, self.eta, class_labels=self.class_labels,  cfg_scale=self.cfg_scale, diffusion=self.diffusion)
+                        x = out["sample"]
+                        # guide_step에서 autograd graph를 참조할 수 있는 모든 텐서/변수 해제
+                        for k in list(out.keys()):
+                            del out[k]
+                        del out
+                        torch.cuda.empty_cache()
+
+                x, _ = x.chunk(2, dim=0)  # Remove null class samples
+
+                with torch.no_grad():
+                    x = self.vae.decode(x / 0.18215, return_dict=False)[0]
+
+            tot_samples.append(x.cpu())
+            del x
+            torch.cuda.empty_cache()
         return torch.concat(tot_samples)
         
     @staticmethod
@@ -207,19 +257,12 @@ class ImageSampler(BaseSampler):
 
     @staticmethod
     def obj_to_tensor(objs: List[Image.Image]) -> torch.Tensor:
-        '''
-            convert a list of PIL images into tensors
-        '''
         images = [to_tensor(pil_image) for pil_image in objs]
         tensor_images = torch.stack(images)
         return tensor_images * 2 - 1
 
 
 class MoleculeSampler(BaseSampler):
-    """
-        This class is responsible for sampling molecules using DDIM.
-
-    """
     def __init__(self, args: Arguments):
 
         super(MoleculeSampler, self).__init__(args)
@@ -286,9 +329,6 @@ class MoleculeSampler(BaseSampler):
         return vdm, nodes_dist, prop_dist
 
     def _build_diffusion(self, args):
-        '''
-            Different diffusion models should be registered here
-        '''
         # dataloader
         args.args_gen.load_charges = False
         dataloaders = self._get_dataloader(args.args_gen)
@@ -321,9 +361,6 @@ class MoleculeSampler(BaseSampler):
         return x
 
     def noise_fn(self, x, sigma, node_mask, **kwargs):
-        """
-        Samples mean-centered normal noise for z_x, and standard normal noise for z_h.
-        """
         def sample_center_gravity_zero_gaussian_with_mask(size, device, node_mask):
             assert len(size) == 3
             x = torch.randn(size, device=device)
