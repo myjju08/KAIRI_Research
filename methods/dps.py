@@ -12,7 +12,7 @@ import torchvision.transforms as T
 import torch
 import numpy as np
 
-def stp(s, ts: torch.Tensor):  # scalar tensor product
+def stp(s, ts: torch.Tensor):
     if isinstance(s, np.ndarray):
         s = torch.from_numpy(s).type_as(ts)
     extra_dims = (1,) * (ts.dim() - 1)
@@ -21,138 +21,53 @@ def stp(s, ts: torch.Tensor):  # scalar tensor product
 def duplicate(tensor, *size):
     return tensor.unsqueeze(dim=0).expand(*size, *tensor.shape)
 
-class UViT_VPSDE:
-    def __init__(self, beta_min=0.1, beta_max=20):
-        self.beta_0 = beta_min
-        self.beta_1 = beta_max
-    def drift(self, x, t):
-        return -0.5 * stp(self.squared_diffusion(t), x)
-    def diffusion(self, t):
-        return self.squared_diffusion(t) ** 0.5
-    def squared_diffusion(self, t):
-        return self.beta_0 + t * (self.beta_1 - self.beta_0)
-    def squared_diffusion_integral(self, s, t):
-        return self.beta_0 * (t - s) + (self.beta_1 - self.beta_0) * (t ** 2 - s ** 2) * 0.5
-    def skip_beta(self, s, t):
-        return 1. - self.skip_alpha(s, t)
-    def skip_alpha(self, s, t):
-        x = -self.squared_diffusion_integral(s, t)
-        return x.exp()
-    def cum_beta(self, t):
-        return self.skip_beta(0, t)
-    def cum_alpha(self, t):
-        return self.skip_alpha(0, t)
-    def nsr(self, t):
-        return self.squared_diffusion_integral(0, t).expm1()
-    
-    def snr(self, t):
-        return 1. / self.nsr(t)
+# U-ViT 원본 SDE 클래스 사용
+from sde import VPSDE as UViT_VPSDE
 
-class UViT_ScoreModel:
-    def __init__(self, nnet: torch.nn.Module, pred: str, sde: UViT_VPSDE, T=1):
-        assert T == 1
-        self.nnet = nnet
-        self.pred = pred
-        self.sde = sde
-        self.T = T
-    def predict(self, xt, t, **kwargs):
-        if not isinstance(t, torch.Tensor):
-            t = torch.tensor(t)
-        t = t.to(xt.device)
-        if t.dim() == 0:
-            t = duplicate(t, xt.size(0))
-        
-        # 공식 U-ViT와 동일하게 t * 999 사용
-        t_for_model = t * 999  # 0~999 범위 (공식과 동일)
-        t_float = t.float()
-        t_for_model_float = t_for_model.float()
-        print(f"[DEBUG] predict input t stats: min={t_float.min().item():.6f}, max={t_float.max().item():.6f}, mean={t_float.mean().item():.6f}")
-        print(f"[DEBUG] predict t_for_model stats: min={t_for_model_float.min().item():.6f}, max={t_for_model_float.max().item():.6f}, mean={t_for_model_float.mean().item():.6f}")
-        
-        return self.nnet(xt, t_for_model, **kwargs)
-    def noise_pred(self, xt, t, **kwargs):
-        pred = self.predict(xt, t, **kwargs)
-        
-        # 디버깅: noise_pred 계산 확인
-        print(f"[DEBUG] noise_pred - pred norm: {pred.norm():.6f}")
-        print(f"[DEBUG] noise_pred - pred stats: min={pred.min().item():.6f}, max={pred.max().item():.6f}, mean={pred.mean().item():.6f}")
-        
-        if self.pred == 'noise_pred':
-            noise_pred = pred
-        elif self.pred == 'x0_pred':
-            noise_pred = - stp(self.sde.snr(t).sqrt(), pred) + stp(self.sde.cum_beta(t).rsqrt(), xt)
-        else:
-            raise NotImplementedError
-            
-        print(f"[DEBUG] noise_pred - final noise_pred norm: {noise_pred.norm():.6f}")
-        return noise_pred
-    def x0_pred(self, xt, t, **kwargs):
-        # t를 그대로 사용 (근사하지 않음)
-        t_float = t.float()
-        print(f"[DEBUG] x0_pred input t stats: min={t_float.min().item():.6f}, max={t_float.max().item():.6f}, mean={t_float.mean().item():.6f}")
-        print(f"[DEBUG] x0_pred input t shape: {t.shape}, dtype: {t.dtype}")
-        
-        # xt 값 확인
-        print(f"[DEBUG] xt stats: min={xt.min().item():.6f}, max={xt.max().item():.6f}, mean={xt.mean().item():.6f}, std={xt.std().item():.6f}")
-        print(f"[DEBUG] xt norm: {torch.norm(xt).item():.6f}")
-        print(f"[DEBUG] xt shape: {xt.shape}")
-        print(f"[DEBUG] xt numel: {xt.numel()}")
-        print(f"[DEBUG] xt L2 norm per element: {torch.norm(xt).item() / xt.numel():.6f}")
-        
-        pred = self.predict(xt, t, **kwargs)
-        print(f"[DEBUG] predict output stats: min={pred.min().item():.6f}, max={pred.max().item():.6f}, mean={pred.mean().item():.6f}")
-        
-        if self.pred == 'noise_pred':
-            cum_alpha = self.sde.cum_alpha(t)
-            nsr = self.sde.nsr(t)
-            print(f"[DEBUG] cum_alpha stats: min={cum_alpha.min().item():.6f}, max={cum_alpha.max().item():.6f}")
-            print(f"[DEBUG] nsr stats: min={nsr.min().item():.6f}, max={nsr.max().item():.6f}")
-            
-            # VPSDE 계산 확인
-            beta_0 = self.sde.beta_0
-            beta_1 = self.sde.beta_1
-            squared_diffusion_integral = self.sde.squared_diffusion_integral(0, t)
-            print(f"[DEBUG] VPSDE params - beta_0: {beta_0}, beta_1: {beta_1}")
-            print(f"[DEBUG] squared_diffusion_integral stats: min={squared_diffusion_integral.min().item():.6f}, max={squared_diffusion_integral.max().item():.6f}, mean={squared_diffusion_integral.mean().item():.6f}")
-            print(f"[DEBUG] exp(-integral) stats: min={torch.exp(-squared_diffusion_integral).min().item():.6f}, max={torch.exp(-squared_diffusion_integral).max().item():.6f}, mean={torch.exp(-squared_diffusion_integral).mean().item():.6f}")
-            
-            # U-ViT 공식 코드와 동일한 x0_pred 공식 사용
-            x0_pred = stp(cum_alpha.rsqrt(), xt) - stp(nsr.sqrt(), pred)
-            print(f"[DEBUG] x0_pred final stats: min={x0_pred.min().item():.6f}, max={x0_pred.max().item():.6f}, mean={x0_pred.mean().item():.6f}")
-        elif self.pred == 'x0_pred':
-            x0_pred = pred
-        else:
-            raise NotImplementedError
-        return x0_pred
-    def score(self, xt, t, **kwargs):
-        cum_beta = self.sde.cum_beta(t)
-        noise_pred = self.noise_pred(xt, t, **kwargs)
-        return stp(-cum_beta.rsqrt(), noise_pred)
+# U-ViT 원본 클래스들 사용
+from sde import ScoreModel as UViT_ScoreModel, ReverseSDE as UViT_ReverseSDE
 
-class UViT_ReverseSDE:
-    def __init__(self, score_model):
-        self.sde = score_model.sde
-        self.score_model = score_model
-    def drift(self, x, t, **kwargs):
-        drift = self.sde.drift(x, t)
-        diffusion = self.sde.diffusion(t)
-        score = self.score_model.score(x, t, **kwargs)
-        
-        # 디버깅: drift 계산 확인
-        print(f"[DEBUG] ReverseSDE drift - sde.drift norm: {drift.norm():.6f}")
-        print(f"[DEBUG] ReverseSDE drift - diffusion: {diffusion:.6f}")
-        print(f"[DEBUG] ReverseSDE drift - score norm: {score.norm():.6f}")
-        print(f"[DEBUG] ReverseSDE drift - diffusion^2 * score norm: {stp(diffusion ** 2, score).norm():.6f}")
-        
-        return drift - stp(diffusion ** 2, score)
-    def diffusion(self, t):
-        return self.sde.diffusion(t)
-
-# 더미 UViT 모델 함수 제거 - 실제 UViT 모델을 사용하므로 불필요
-# @torch.no_grad()
-# def uvit_step(x, t, model, model_name_or_path, image_size, **kwargs):
-#     # 이 함수는 더 이상 사용하지 않음 - guide_step에서 실제 UViT 모델을 로드함
-#     pass
+@torch.no_grad()
+def uvit_step(x, t, model, model_name_or_path, image_size, **kwargs):
+    # 실제 UViT 모델 사용
+    from libs.uvit import UViT
+    uvit_model = UViT(
+        img_size=32,
+        patch_size=2,
+        in_chans=3,
+        embed_dim=512,
+        depth=12,
+        num_heads=8,
+        mlp_ratio=4,
+        qkv_bias=False,
+        mlp_time_embed=False,
+        num_classes=-1,
+        norm_layer=nn.LayerNorm,
+        use_checkpoint=False
+    ).to(x.device)
+    state_dict = torch.load(model_name_or_path, map_location=x.device)
+    uvit_model.load_state_dict(state_dict)
+    uvit_model.eval()
+    sde_obj = UViT_VPSDE(beta_min=0.1, beta_max=20)
+    score_model = UViT_ScoreModel(uvit_model, pred='noise_pred', sde=sde_obj)
+    rsde = UViT_ReverseSDE(score_model)
+    # Euler-Maruyama step (한 스텝만)
+    sample_steps = kwargs.get('sample_steps', 1000)
+    eps = 1e-3
+    T = 1
+    timesteps = np.append(0., np.linspace(eps, T, sample_steps))
+    timesteps = torch.tensor(timesteps).to(x)
+    # t는 step 인덱스, t_idx
+    t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
+    s = timesteps[t_idx]
+    t_val = timesteps[t_idx+1] if t_idx+1 < len(timesteps) else 0.0
+    drift = rsde.drift(x, t_val)
+    diffusion = rsde.diffusion(t_val)
+    dt = s - t_val
+    mean = x + drift * dt
+    sigma = diffusion * (-dt).sqrt()
+    x_next = mean + stp(sigma, torch.randn_like(x)) if s != 0 else mean
+    return {"sample": x_next}
 
 def space_timesteps(num_timesteps, section_counts):
     if isinstance(section_counts, str):
@@ -592,154 +507,97 @@ class DPSGuidance(BaseGuidance):
         x: th.Tensor,
         t: th.Tensor,
         model: th.nn.Module,
-        ts: th.LongTensor,
-        alpha_prod_ts: th.Tensor,
-        alpha_prod_t_prevs: th.Tensor,
-        eta: float,
+        ts: th.LongTensor = None,
+        alpha_prod_ts: th.Tensor = None,
+        alpha_prod_t_prevs: th.Tensor = None,
+        eta: float = 0.0,
         class_labels=None,
         cfg_scale=4.0,
         diffusion=None,
         model_type=None,
         model_name_or_path=None,
         image_size=None,
-        guidance_scale=100.0,  # 하이퍼파라미터로 노출 (DPS guidance 활성화, 더 강한 강도)
         **kwargs,
     ) -> th.Tensor:
         if model_type == 'uvit':
-            # U-ViT DPS 방식 구현 (x_t -> x_0 -> classifier -> grad)
-            sde_obj = UViT_VPSDE(beta_min=0.1, beta_max=20)
+            # UViT SDE 기반 DPS 구현
+            from sde import VPSDE, ScoreModel, ReverseSDE
+            from libs.uvit import UViT
             
-            # U-ViT 모델을 한 번만 로드하도록 캐싱
-            if not hasattr(self, '_uvit_score_model'):
-                if model_name_or_path is not None:
-                    print(f"[DEBUG] Loading UViT model from: {model_name_or_path}")
-                    # UViT 모델 클래스 import
-                    import sys
-                    import os
-                    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'diffusion', 'transformer'))
-                    from uvit_cifar10 import UViT
-                    
-                    # UViT 모델 인스턴스 생성 (CIFAR-10용 설정)
-                    uvit_model = UViT(
-                        img_size=32,  # CIFAR-10 이미지 크기
-                        patch_size=2,  # CIFAR-10용 패치 크기
-                        in_chans=3,
-                        embed_dim=512,
-                        depth=12,
-                        num_heads=8,
-                        mlp_ratio=4.,
-                        num_classes=-1,  # noise prediction
-                        use_checkpoint=False,
-                        conv=True,
-                        skip=True
-                    ).to(x.device)
-                    
-                    # 모델 가중치 로드
-                    state_dict = torch.load(model_name_or_path, map_location=x.device)
-                    uvit_model.load_state_dict(state_dict, strict=False)
-                    # UViT 모델을 train 모드로 설정하여 gradient 계산 보장
-                    uvit_model.train()
-                    
-                    print(f"[DEBUG] UViT model loaded successfully")
-                    self._uvit_score_model = UViT_ScoreModel(uvit_model, pred='noise_pred', sde=sde_obj)
-                else:
-                    # fallback: 전달받은 model 사용
-                    print(f"[DEBUG] Using provided model for UViT")
-                    self._uvit_score_model = UViT_ScoreModel(model, pred='noise_pred', sde=sde_obj)
+            # UViT 모델 로드 (캐싱 가능)
+            if not hasattr(self, '_uvit_model') or self._uvit_model is None:
+                self._uvit_model = UViT(
+                    img_size=32,
+                    patch_size=2,
+                    in_chans=3,
+                    embed_dim=512,
+                    depth=12,
+                    num_heads=8,
+                    mlp_ratio=4,
+                    qkv_bias=False,
+                    mlp_time_embed=False,
+                    num_classes=-1,
+                    norm_layer=torch.nn.LayerNorm,
+                    use_checkpoint=False
+                ).to(x.device)
+                state_dict = torch.load(model_name_or_path, map_location=x.device)
+                self._uvit_model.load_state_dict(state_dict)
+                self._uvit_model.eval()
             
-            score_model = self._uvit_score_model
-                
-            rsde = UViT_ReverseSDE(score_model)
+            # SDE 설정
+            sde_obj = VPSDE(beta_min=0.1, beta_max=20)
+            score_model = ScoreModel(self._uvit_model, pred='noise_pred', sde=sde_obj)
+            rsde = ReverseSDE(score_model)
+            
+            # SDE timesteps 설정
             sample_steps = kwargs.get('sample_steps', 50)
             eps = 1e-3
             T = 1
-            # 공식 U-ViT와 동일하게 timesteps 생성
-            timesteps = np.append(0., np.linspace(eps, T, sample_steps))
+            timesteps = np.linspace(eps, T, sample_steps+1)
             timesteps = torch.tensor(timesteps).to(x)
-            print(f"[DEBUG] timesteps: {timesteps[:5]} ... {timesteps[-5:]}")  # 디버깅용
             
-            # 공식 U-ViT와 동일하게 timestep 순서 수정
-            # t_idx는 49, 48, 47, ..., 0 순서 (reversed)
-            # timesteps는 [0.0, 0.02, 0.04, ..., 1.0] 순서
-            # 공식 U-ViT: for s, t in zip(timesteps, timesteps[1:])[::-1]
+            # 현재 timestep 계산
             t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
-            
-            # 공식 U-ViT와 동일하게 s, t 순서로 매핑
-            if t_idx >= len(timesteps) - 1:
-                print(f"[WARNING] t_idx={t_idx} >= {len(timesteps)-1}, skipping step")
-                return x
-                
-            s = timesteps[t_idx]      # s: 현재 timestep
-            t_val = timesteps[t_idx+1]  # t: 다음 timestep (s > t이므로 양수)
+            s = timesteps[t_idx]
+            t_val = timesteps[t_idx+1] if t_idx+1 < len(timesteps) else 0.0
             
             if t_val >= 1.0:
                 print(f"[WARNING] t_val={t_val:.4f} >= 1.0, skipping step")
                 return x
-            target_class = class_labels[0].item() if class_labels is not None else 6  # 기본값을 6으로 변경
-
-            # U-ViT는 0~1 범위의 연속적인 timestep을 사용해야 함
-            # 로그를 보면 t가 0~50 범위로 들어오므로 0~1로 정규화
-            t_cont = t.float() / 50.0  # 0~1 범위로 정규화 (50 steps 가정)
-            t_float = t.float()
-            t_cont_float = t_cont.float()
-            print(f"[DEBUG] guide_step original t stats: min={t_float.min().item():.6f}, max={t_float.max().item():.6f}, mean={t_float.mean().item():.6f}")
-            print(f"[DEBUG] guide_step t_cont stats: min={t_cont_float.min().item():.6f}, max={t_cont_float.max().item():.6f}, mean={t_cont_float.mean().item():.6f}")
             
-            # U-ViT 공식 코드와 동일하게 SDE 기반 sampling 사용
-            from diffusion.transformer.uvit_sde import euler_maruyama, ReverseSDE
+            target_class = class_labels[0].item() if class_labels is not None else 1000
             
-            # dt = s - t_val (s > t_val이므로 양수)
-            
-            # x_t에 grad 연결
+            # DPS: x_t -> x_0 -> classifier -> gradient
             x_with_grad = x.detach().clone().requires_grad_(True)
+            x0_pred = score_model.x0_pred(x_with_grad, t_val)
             
-            # 1. x_0 복원 (chain rule 적용)
-            x0_pred = score_model.x0_pred(x_with_grad, t_cont)
+            # NaN/Inf 체크
             if torch.isnan(x0_pred).any() or torch.isinf(x0_pred).any():
                 print(f'[ERROR] x0_pred contains NaN/Inf! min={x0_pred.min().item()}, max={x0_pred.max().item()}')
+                grad_xt = torch.zeros_like(x)
             else:
                 print(f'[DEBUG] x0_pred stats: min={x0_pred.min().item()}, max={x0_pred.max().item()}, mean={x0_pred.mean().item()}, std={x0_pred.std().item()}')
+                # Classifier gradient 계산
+                grad_xt = self._compute_gradient_wrt_x0_uvit(x_with_grad, target_class, t_val, score_model=score_model)
+                if grad_xt is None or torch.isnan(grad_xt).any() or torch.isinf(grad_xt).any():
+                    print(f"[WARNING] grad_xt contains NaN/Inf, using zero gradient")
+                    grad_xt = torch.zeros_like(x)
             
-            # 2. Gradient 계산 (guidance_scale이 0이면 zero gradient 사용)
-            if guidance_scale == 0.0:
-                print(f"[DEBUG] guidance_scale=0.0, using zero gradient")
-                grad_xt = torch.zeros_like(x)
-                step_log = f"[STEP {t_idx}] t_val: {t_val:.4f}, x norm: {x.norm():.4f}, grad_xt norm: {grad_xt.norm():.4f} (ZERO)"
-            else:
-                # x_0에 classifier 적용 및 log_prob 계산, chain rule로 x_t에 대한 gradient 계산
-            grad_xt = self._compute_gradient_wrt_x0_uvit(x_with_grad, target_class, t_cont, score_model=score_model)
-            if grad_xt is None:
-                grad_xt = torch.zeros_like(x)
-            if torch.isnan(grad_xt).any() or torch.isinf(grad_xt).any():
-                print(f"[WARNING] grad_xt contains NaN/Inf, using zero gradient")
-                grad_xt = torch.zeros_like(x)
+            print(f"[DEBUG] t_val: {t_val:.4f}, x norm: {x.norm():.4f}, grad_xt norm: {grad_xt.norm():.4f}")
             
-            # Gradient 방향 확인을 위해 clipping 제거
-            grad_norm = grad_xt.norm()
-            print(f"[DEBUG] Original gradient norm: {grad_norm:.4f}")
-            print(f"[DEBUG] Gradient direction check - grad_xt mean: {grad_xt.mean():.4f}, std: {grad_xt.std():.4f}")
-            # Gradient clipping 제거 - 원래 gradient 방향 유지
-                
-            # 스텝별 class 6 확률 추적 및 gradient norm 확인
-            step_log = f"[STEP {t_idx}] t_val: {t_val:.4f}, x norm: {x.norm():.4f}, grad_xt norm: {grad_xt.norm():.4f}"
-            print(step_log)
-            
-            # 로그 파일에 저장
-            import os
-            log_dir = os.path.dirname(self.args.logging_dir) if hasattr(self, 'args') else 'logs'
-            step_log_file = os.path.join(log_dir, 'step_logs.txt')
-            with open(step_log_file, 'a') as f:
-                f.write(step_log + '\n')
-            
-            # 3. Classifier 디버깅 (guidance_scale이 0이면 건너뛰기)
-            if guidance_scale != 0.0:
-            # Classifier 출력 디버깅 (x_0 기준) - 스텝별 확률 변화 추적
+            # Classifier 확률값 디버깅
             with torch.no_grad():
-                x0_img = (x0_pred + 1) / 2 # No clamp on x0_img here
-                # CIFAR-10 classifier에는 공식 mean/std 정규화만 적용
+                # x0_pred를 이미지 형태로 변환
+                x0_img = x0_pred.clamp(-1, 1)
+                x0_img = (x0_img + 1) / 2  # [-1,1] -> [0,1]
+                x0_img = x0_img.clamp(0, 1)
+                
+                # CIFAR-10 정규화 적용
                 import torchvision.transforms as T
                 normalize = T.Normalize((0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616))
                 x0_img_norm = torch.stack([normalize(img) for img in x0_img])
+                
+                # Classifier 찾기
                 classifier = None
                 if hasattr(self, 'guider') and hasattr(self.guider, 'get_guidance'):
                     get_guidance = self.guider.get_guidance
@@ -747,94 +605,61 @@ class DPSGuidance(BaseGuidance):
                         guider_obj = get_guidance.func.__self__
                         if hasattr(guider_obj, 'classifier'):
                             classifier = guider_obj.classifier
+                
                 if classifier is not None:
                     with torch.no_grad():
                         if hasattr(classifier, '_forward'):
                             all_logits = classifier._forward(x0_img_norm)
                             all_probs = torch.softmax(all_logits, dim=1)
-                            frog_probs = all_probs[:, 6]  # class 6 (개구리)
                             
-                            # 스텝별 상세 로깅
-                            class6_log = f"[STEP {t_idx}] Class 6 (frog) probabilities:"
-                            class6_log += f"\n  - Min: {frog_probs.min():.4f}, Max: {frog_probs.max():.4f}, Mean: {frog_probs.mean():.4f}"
-                            class6_log += f"\n  - Std: {frog_probs.std():.4f}, Median: {frog_probs.median():.4f}"
+                            # 타겟 클래스 (개구리=6) 확률
+                            target_probs = all_probs[:, target_class]
                             
-                            # 상위 5개 샘플의 class 6 확률
-                            top5_indices = torch.topk(frog_probs, 5).indices
-                            top5_probs = frog_probs[top5_indices]
-                            class6_log += f"\n  - Top 5 samples class 6 probs: {top5_probs.cpu().numpy()}"
+                            # 전체 클래스 확률 분포
+                            class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+                            target_class_name = class_names[target_class] if target_class < len(class_names) else f'class_{target_class}'
                             
-                            # 전체 클래스 분포 (첫 번째 샘플 기준)
-                            first_sample_probs = all_probs[0].cpu().numpy()
-                            class6_log += f"\n  - First sample all class probs: {first_sample_probs}"
+                            print(f"[DEBUG] Classifier Results (t={t_val:.4f}):")
+                            print(f"  Target class ({target_class_name}): prob={target_probs.mean().item():.4f} (min={target_probs.min().item():.4f}, max={target_probs.max().item():.4f})")
                             
-                            # Class 6이 가장 높은 확률을 가진 샘플 수
-                            max_class_indices = torch.argmax(all_probs, dim=1)
-                            class6_count = (max_class_indices == 6).sum().item()
-                            total_samples = all_probs.shape[0]
-                            class6_log += f"\n  - Samples with class 6 as max: {class6_count}/{total_samples} ({class6_count/total_samples*100:.1f}%)"
+                            # 모든 샘플의 frog 확률값 출력
+                            frog_probs = all_probs[:, target_class]  # frog = class 6
+                            print(f"  All samples frog probs: {[f'{prob:.4f}' for prob in frog_probs.cpu().numpy()]}")
                             
-                            print(class6_log)
+                            # Top-3 클래스 확률
+                            top3_probs, top3_indices = torch.topk(all_probs.mean(dim=0), 3)
+                            print(f"  Top-3 classes: {[f'{class_names[idx]}({prob:.4f})' for idx, prob in zip(top3_indices.cpu().numpy(), top3_probs.cpu().numpy())]}")
                             
-                            # 로그 파일에 저장
-                            with open(step_log_file, 'a') as f:
-                                f.write(class6_log + '\n')
-                            
+                            # 첫 번째 샘플의 상세 확률
+                            if x0_img.shape[0] > 0:
+                                first_sample_probs = all_probs[0]
+                                print(f"  First sample probs: {[f'{name}:{prob:.4f}' for name, prob in zip(class_names, first_sample_probs.cpu().numpy())]}")
                         else:
                             classifier_output = classifier(x0_img_norm)
-                            print(f"[STEP {t_idx}] Raw classifier output: {classifier_output[:5]}")
-                            print(f"[STEP {t_idx}] Classifier output shape: {classifier_output.shape}")
+                            print(f"[DEBUG] Raw classifier output shape: {classifier_output.shape}")
                 else:
-                    print(f"[STEP {t_idx}] Classifier not found, skipping classifier check")
-            else:
-                print(f"[DEBUG] guidance_scale=0.0, skipping classifier computation")
+                    print(f"[DEBUG] Classifier not found")
             
-            # 4. SDE Step (U-ViT 공식과 동일)
+            # SDE step with DPS guidance
             with torch.no_grad():
-                # SDE drift와 diffusion 계산 (공식 U-ViT와 동일)
-                rsde = ReverseSDE(score_model)
-                drift = rsde.drift(x, t_val)  # 현재 timestep t_val 사용
-                diffusion = rsde.diffusion(t_val)  # 현재 timestep t_val 사용
-                dt = s - t_val  # s > t_val이므로 양수
-                
-                print(f"[DEBUG] SDE step - drift norm: {drift.norm():.6f}, diffusion: {diffusion:.6f}, dt: {dt:.6f}")
-                print(f"[DEBUG] SDE step - x norm: {x.norm():.6f}, drift*dt norm: {(drift*dt).norm():.6f}")
-                
-                # 기본 SDE step (공식 U-ViT와 동일)
+                drift = rsde.drift(x, t_val)
+                diffusion = rsde.diffusion(t_val)
+                dt = s - t_val
                 mean = x + drift * dt
-                
-                # DPS guidance 추가 (guidance_scale이 0이면 추가하지 않음)
-                if guidance_scale != 0.0:
-                    guidance_term = guidance_scale * (diffusion**2) * grad_xt
-                    mean = mean + guidance_term
-                    print(f"[DEBUG] Guidance term norm: {guidance_term.norm():.4f}, guidance_scale: {guidance_scale}")
-                    print(f"[DEBUG] Mean before guidance: {(x + drift * dt).norm():.4f}, after guidance: {mean.norm():.4f}")
-                    guidance_strength = guidance_term.norm() / (x + drift * dt).norm()
-                    print(f"[DEBUG] Guidance strength: {guidance_strength:.4f}")
-                    print(f"[DEBUG] Guidance term magnitude: {guidance_term.norm():.4f}")
-                    print(f"[DEBUG] Base mean magnitude: {(x + drift * dt).norm():.4f}")
-                    print(f"[DEBUG] Relative guidance strength: {guidance_strength*100:.2f}%")
-                else:
-                    print(f"[DEBUG] guidance_scale=0.0, no guidance applied")
-                
                 sigma = diffusion * (-dt).sqrt()
                 
-                # 최종 step (공식 U-ViT와 동일) - stp 함수 사용
-                if s != 0:  # U-ViT 공식과 동일한 조건
-                    x_next = mean + stp(sigma, torch.randn_like(x))
-                else:
-                    x_next = mean
+                                # DPS guidance 적용
+                guidance_scale = 1.0  # DPS guidance 활성화
+                x_next = mean + sigma * torch.randn_like(x) + guidance_scale * (sigma**2) * grad_xt
                 
-                print(f"[DEBUG] Final step - mean norm: {mean.norm():.4f}, x_next norm: {x_next.norm():.4f}")
-                
-                # NaN/Inf 체크
                 if torch.isnan(x_next).any() or torch.isinf(x_next).any():
                     print(f"[ERROR] x_next contains NaN/Inf, using mean only")
                     x_next = mean
                 
-                # 메모리 정리
-                torch.cuda.empty_cache()
-            return x_next
+                print(f"[DEBUG] guidance_scale: {guidance_scale}, mean norm: {mean.norm():.4f}, x_next norm: {x_next.norm():.4f}")
+                
+                return x_next
+
         elif model_type in ['transformer']:
             # 기존 DiT step 함수 (기존 코드)
             # 타겟 클래스 사용 (class_labels가 None이면 1000 사용)
@@ -1007,57 +832,23 @@ class DPSGuidance(BaseGuidance):
         x_t -> x_0 -> classifier log prob을 x_t에 대해 직접 미분 (chain rule 없이 autograd로)
         """
         try:
-            # 1. x_t에 requires_grad 설정 - 중요한 수정: 원본 x_t를 직접 수정하지 않고 새로 생성
-            x_t_with_grad = x_t.detach().clone().requires_grad_(True)
-            
-            # 2. t를 0~1 범위로 정규화
-            t_cont = t.float() / 50.0  # 0~1 범위로 정규화 (50 steps 가정)
-            
-            # t=1에서도 gradient 계산 - 조건 제거
-            # if t_cont.max() > 0.99:  # STEP 1 근처 (더 관대한 조건)
-            #     print(f"[DEBUG] STEP 1 detected (t={t_cont.max():.4f}), using zero gradient")
-            #     return th.zeros_like(x_t)
-                
-            # 디버깅: t 값 확인 - dtype 변환 추가
-            t_cont_float = t_cont.float()  # Long을 Float로 변환
-            print(f"[DEBUG] _compute_gradient_wrt_x0_uvit input t stats: min={t.min().item():.6f}, max={t.max().item():.6f}, mean={t.mean().item():.6f}")
-            print(f"[DEBUG] _compute_gradient_wrt_x0_uvit t_cont stats: min={t_cont_float.min().item():.6f}, max={t_cont_float.max().item():.6f}, mean={t_cont_float.mean().item():.6f}")
-            
-            # 3. x_0 복원 (score_model 필요)
+            # 1. x_t에 requires_grad 설정
+            x_t = x_t.to(dtype=th.float32).detach().clone().requires_grad_(True)
+
+            # 2. x_0 복원 (score_model 필요)
             if score_model is None:
                 raise ValueError('score_model must be provided for x_t -> x_0 변환')
-            
-            # UViT 모델 상태 변경하지 않음 - gradient 계산만 위해 requires_grad 설정
-            if hasattr(score_model, 'nnet'):
-                # 모델 상태는 변경하지 않고 gradient 계산만 활성화
-                pass
-                
-            # U-ViT 공식 코드와 동일한 SDE 기반 x0_pred 계산
-            # x0_pred = stp(self.sde.cum_alpha(t).rsqrt(), xt) - stp(self.sde.nsr(t).sqrt(), pred)
-            x0_pred = score_model.x0_pred(x_t_with_grad, t_cont)
-            
-            # 디버깅: x0_pred 값 확인
-            print(f"[DEBUG] x0_pred stats: min={x0_pred.min().item():.4f}, max={x0_pred.max().item():.4f}, mean={x0_pred.mean().item():.4f}")
-            print(f"[DEBUG] x0_pred requires_grad: {x0_pred.requires_grad}")
-            
-            # 4. 이미지 변환 및 정규화 - U-ViT 공식 코드와 동일하게 처리
-            x0_img = (x0_pred + 1) / 2
-            # x0_img = x0_img.clamp(0, 1)  # gradient flow를 위해 clamp 제거
-            
-            # x0_pred와 classifier 입력값 디버깅
-            print(f"[DEBUG] x0_pred stats - min: {x0_pred.min():.4f}, max: {x0_pred.max():.4f}, mean: {x0_pred.mean():.4f}")
-            print(f"[DEBUG] x0_img stats - min: {x0_img.min():.4f}, max: {x0_img.max():.4f}, mean: {x0_img.mean():.4f}")
-            print(f"[DEBUG] x0_img norm: {x0_img.norm():.4f}")
-            
-            # CIFAR-10 정규화 (tensor 연산만 사용)
+            x0_pred = score_model.x0_pred(x_t, t)
+            x0_img = x0_pred.clamp(-1, 1)
+            x0_img = (x0_img + 1) / 2
+            x0_img = x0_img.clamp(0, 1)
+
+            # 2-1. CIFAR-10 정규화 (gradient가 끊기지 않게 tensor 연산으로 적용)
             mean = th.tensor([0.4914, 0.4822, 0.4465], device=x0_img.device, dtype=x0_img.dtype)[None, :, None, None]
             std = th.tensor([0.2471, 0.2435, 0.2616], device=x0_img.device, dtype=x0_img.dtype)[None, :, None, None]
             x0_img_norm = (x0_img - mean) / std
-            
-            print(f"[DEBUG] x0_img_norm stats - min: {x0_img_norm.min():.4f}, max: {x0_img_norm.max():.4f}, mean: {x0_img_norm.mean():.4f}")
-            print(f"[DEBUG] x0_img_norm requires_grad: {x0_img_norm.requires_grad}")
-            
-            # 5. Classifier 찾기
+
+            # 3. Classifier 찾기
             classifier = None
             if hasattr(self, 'guider') and hasattr(self.guider, 'get_guidance'):
                 get_guidance = self.guider.get_guidance
@@ -1065,152 +856,33 @@ class DPSGuidance(BaseGuidance):
                     guider_obj = get_guidance.func.__self__
                     if hasattr(guider_obj, 'classifier'):
                         classifier = guider_obj.classifier
-                        
             if classifier is None:
                 print("Warning: No classifier found, using zero gradient")
                 return th.zeros_like(x_t)
-            
-            # Classifier 상태 변경하지 않음 - gradient 계산만 활성화
-            # classifier.train()  # 모델 상태 변경하지 않음
-            # for param in classifier.parameters():
-            #     param.requires_grad = True
-                
-            # 6. Classifier forward pass
+
             logits = classifier(x0_img_norm)
-            print(f"[DEBUG] logits shape: {logits.shape}, requires_grad: {logits.requires_grad}")
-            
-            # 7. Log probability 계산
             if logits.ndim == 1:
                 selected_log_probs = logits
             else:
                 probs = th.nn.functional.softmax(logits, dim=1)
-                log_probs = th.log(probs + 1e-8)  # 수치 안정성을 위한 epsilon 추가
+                log_probs = th.log(probs)
                 batch_size = x0_img.shape[0]
                 if isinstance(target_class, int):
                     selected_log_probs = log_probs[range(batch_size), target_class]
-                    print(f"[DEBUG] Using target_class: {target_class} for gradient computation")
                 else:
-                    selected_log_probs = log_probs[range(batch_size), 6]  # class 6 (frog)에 대한 gradient 계산
-                    print(f"[DEBUG] Using default class 6 (frog) for gradient computation")
-                    
-            print(f"[DEBUG] selected_log_probs shape: {selected_log_probs.shape}, requires_grad: {selected_log_probs.requires_grad}")
-            print(f"[DEBUG] selected_log_probs values: {selected_log_probs.detach().cpu().numpy()}")
-            
-            # 8. Gradient 계산 - NEGATIVE log probability를 최소화 (확률 최대화)
-            # 더 강한 guidance를 위해 각 샘플별로 개별적으로 처리
-            log_prob_sum = -selected_log_probs.sum()  # NEGATIVE log probability 합계 (확률 최대화)
-            print(f"[DEBUG] log_prob_sum (negative): {log_prob_sum.item()}, requires_grad: {log_prob_sum.requires_grad}")
-            print(f"[DEBUG] Individual log probs: {selected_log_probs.detach().cpu().numpy()}")
-            print(f"[DEBUG] Target class probabilities: {torch.exp(selected_log_probs).detach().cpu().numpy()}")
-            
-            # gradient 계산 전에 backward() 사용하여 더 안정적인 gradient 계산
-            log_prob_sum.backward(retain_graph=True)
-            grad_xt = x_t_with_grad.grad.clone() if x_t_with_grad.grad is not None else th.zeros_like(x_t)
-            
-            # gradient 초기화
-            x_t_with_grad.grad.zero_() if x_t_with_grad.grad is not None else None
-            
-            # 디버깅: gradient norm 확인
-            print(f"[DEBUG] grad_xt norm: {grad_xt.norm().item():.4f}, grad_xt std: {grad_xt.std().item():.4f}")
-            print(f"[DEBUG] grad_xt min: {grad_xt.min().item():.4f}, grad_xt max: {grad_xt.max().item():.4f}")
-            
-            # Gradient 방향 분석
-            print(f"[DEBUG] Gradient direction analysis:")
-            print(f"  - Positive gradients: {(grad_xt > 0).sum().item()}/{grad_xt.numel()} ({(grad_xt > 0).float().mean().item():.2%})")
-            print(f"  - Negative gradients: {(grad_xt < 0).sum().item()}/{grad_xt.numel()} ({(grad_xt < 0).float().mean().item():.2%})")
-            print(f"  - Zero gradients: {(grad_xt == 0).sum().item()}/{grad_xt.numel()} ({(grad_xt == 0).float().mean().item():.2%})")
-            
-            # gradient가 0인 경우 추가 디버깅
-            if grad_xt.norm() < 1e-8:
-                print(f"[WARNING] grad_xt is zero! Checking computation chain...")
-                print(f"[DEBUG] x0_pred grad_fn: {x0_pred.grad_fn}")
-                print(f"[DEBUG] x0_img grad_fn: {x0_img.grad_fn}")
-                print(f"[DEBUG] x0_img_norm grad_fn: {x0_img_norm.grad_fn}")
-                print(f"[DEBUG] logits grad_fn: {logits.grad_fn}")
-                print(f"[DEBUG] selected_log_probs grad_fn: {selected_log_probs.grad_fn}")
-                print(f"[DEBUG] log_prob_sum grad_fn: {log_prob_sum.grad_fn}")
-                
-                # UViT 모델 상태 확인
-                if hasattr(score_model, 'nnet'):
-                    print(f"[DEBUG] UViT model training mode: {score_model.nnet.training}")
-                    print(f"[DEBUG] UViT model requires_grad: {next(score_model.nnet.parameters()).requires_grad}")
-                
-                # Classifier 상태 확인
-                print(f"[DEBUG] Classifier training mode: {classifier.training}")
-                print(f"[DEBUG] Classifier requires_grad: {next(classifier.parameters()).requires_grad}")
-                
-                # 간단한 테스트: x_t_with_grad에 직접 loss 적용
-                test_loss = x_t_with_grad.sum()
-                test_loss.backward()
-                test_grad = x_t_with_grad.grad.clone()
-                print(f"[DEBUG] Test gradient norm: {test_grad.norm().item():.4f}")
-                x_t_with_grad.grad.zero_()
-                
-                # 추가 테스트: x0_pred에 직접 loss 적용
-                x0_pred_loss = x0_pred.sum()
-                x0_pred_loss.backward()
-                x0_pred_grad = x_t_with_grad.grad.clone()
-                print(f"[DEBUG] x0_pred gradient norm: {x0_pred_grad.norm().item():.4f}")
-                x_t_with_grad.grad.zero_()
-            
-            # Gradient clipping 완전 제거 - gradient 크기 정보 보존
-            # if grad_xt.norm() > 100.0:  # 10.0에서 100.0으로 증가
-            #     grad_xt = grad_xt * 100.0 / grad_xt.norm()
-            #     print(f"[DEBUG] Gradient clipped to norm: {grad_xt.norm().item():.4f}")
-            
-            # Gradient scaling - 더 강한 guidance를 위해 gradient 크기 증가
-                
-            # 메모리 정리
-            del x_t_with_grad, x0_pred, x0_img, x0_img_norm, logits, selected_log_probs, log_prob_sum
+                    selected_log_probs = log_probs[range(batch_size), 0]
+
+            log_prob_sum = selected_log_probs.sum()
+            grad_result = th.autograd.grad(
+                outputs=log_prob_sum,
+                inputs=x_t,
+                retain_graph=False,
+                allow_unused=True
+            )
+            grad_xt = grad_result[0] if grad_result[0] is not None else th.zeros_like(x_t)
             th.cuda.empty_cache()
-            
             return grad_xt
-            
         except Exception as e:
             print(f'U-ViT gradient computation failed: {e}')
-            import traceback
-            traceback.print_exc()
             th.cuda.empty_cache()
             return th.zeros_like(x_t)
-
-def test_gradient_computation():
-    """
-    Gradient 계산을 테스트하는 함수
-    """
-    import torch
-    import torch.nn as nn
-    
-    # 간단한 테스트 모델
-    class TestModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.conv = nn.Conv2d(3, 3, 3, padding=1)
-            
-        def forward(self, x, t, y=None):
-            return self.conv(x)
-    
-    # 테스트 데이터
-    x = torch.randn(1, 3, 32, 32, requires_grad=True)
-    t = torch.tensor([0.5])
-    model = TestModel()
-    
-    # UViT 설정
-    sde_obj = UViT_VPSDE(beta_min=0.1, beta_max=20)
-    score_model = UViT_ScoreModel(model, pred='noise_pred', sde=sde_obj)
-    
-    # x0_pred 테스트
-    x0_pred = score_model.x0_pred(x, t)
-    print(f"x0_pred requires_grad: {x0_pred.requires_grad}")
-    print(f"x0_pred grad_fn: {x0_pred.grad_fn}")
-    
-    # 간단한 loss로 gradient 테스트
-    loss = x0_pred.sum()
-    loss.backward()
-    print(f"x.grad norm: {x.grad.norm()}")
-    
-    return x.grad is not None and x.grad.norm() > 0
-
-if __name__ == "__main__":
-    # Gradient 테스트 실행
-    success = test_gradient_computation()
-    print(f"Gradient test {'PASSED' if success else 'FAILED'}")
