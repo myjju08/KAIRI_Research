@@ -538,11 +538,14 @@ class ImageSampler(BaseSampler):
                 
                 for t_idx in reversed(range(self.inference_steps)):
                     t = torch.full((n,), t_idx, device=device, dtype=torch.long)
+                    guidance_scale_value = getattr(self.args, 'guidance_scale', 1.0)
+                    start_gradient_value = getattr(self.args, 'start_gradient', None)
+                    print(f"[DEBUG] guidance_scale from args: {guidance_scale_value}, start_gradient: {start_gradient_value}")
                     x = guidance.guide_step(
                         x, t, self.model, None, None, None, 0.0,
                         class_labels=class_labels, cfg_scale=0.0, diffusion=None,
                         model_type='uvit', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
-                        guidance_scale=0.01
+                        guidance_scale=guidance_scale_value, start_gradient=start_gradient_value
                     )
                 return x
             self.sample = uvit_sample_fn
@@ -597,10 +600,12 @@ class ImageSampler(BaseSampler):
                 
                 for t_idx in reversed(range(self.inference_steps)):
                     t = torch.full((n,), t_idx, device=device, dtype=torch.long)
+                    start_gradient_value = getattr(self.args, 'start_gradient', None)
                     x = guidance.guide_step(
                         x, t, self.model, None, None, None, 0.0,
                         class_labels=class_labels, cfg_scale=0.0, diffusion=self.diffusion,
-                        model_type='transformer', model_name_or_path=self.model_name_or_path, image_size=self.image_size
+                        model_type='transformer', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
+                        start_gradient=start_gradient_value
                     )
                 return x
             self.sample = transformer_sample_fn
@@ -645,10 +650,12 @@ class ImageSampler(BaseSampler):
                 
                 for t_idx in reversed(range(self.inference_steps)):
                     t = torch.full((n,), t_idx, device=device, dtype=torch.long)
+                    start_gradient_value = getattr(self.args, 'start_gradient', None)
                     x = guidance.guide_step(
                         x, t, self.model, None, None, None, 0.0,
                         class_labels=class_labels, cfg_scale=0.0, diffusion=self.diffusion,
-                        model_type='unet', model_name_or_path=self.model_name_or_path, image_size=self.image_size
+                        model_type='unet', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
+                        start_gradient=start_gradient_value
                     )
                 return x
             self.sample = unet_sample_fn

@@ -34,6 +34,7 @@ if __name__ == '__main__':
     # release torch occupied gpu memory
     torch.cuda.empty_cache()
     
-    #metrics = evaluator.evaluate(samples)
-    #if metrics is not None: # avoid rewriting metrics to json
-    #    logger.log_metrics(metrics, save_json=True)
+    # FID 계산 비활성화 (샘플링만 수행)
+    # metrics = evaluator.evaluate(samples)
+    # if metrics is not None: # avoid rewriting metrics to json
+    #     logger.log_metrics(metrics, save_json=True)

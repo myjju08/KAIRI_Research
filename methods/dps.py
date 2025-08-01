@@ -458,6 +458,10 @@ class DPSGuidance(BaseGuidance):
     def __init__(self, args, diffusion=None, **kwargs):
         super(DPSGuidance, self).__init__(args, **kwargs)
         
+        # Early exit 설정
+        self.use_early_exit = getattr(args, 'use_early_exit', False)
+        self.early_exit_layer = getattr(args, 'early_exit_layer', None)
+        
         # diffusion 인스턴스가 넘어오면 그 속성 사용 (UViT 샘플러 지원)
         if diffusion is not None:
             self.diffusion_obj = diffusion
@@ -517,6 +521,8 @@ class DPSGuidance(BaseGuidance):
         model_type=None,
         model_name_or_path=None,
         image_size=None,
+        guidance_scale=None,
+        start_gradient=None,
         **kwargs,
     ) -> th.Tensor:
         if model_type == 'uvit':
@@ -526,6 +532,7 @@ class DPSGuidance(BaseGuidance):
             
             # UViT 모델 로드 (캐싱 가능)
             if not hasattr(self, '_uvit_model') or self._uvit_model is None:
+                # UViT 모델 생성 (early exit 속성과 관계없이 동일하게)
                 self._uvit_model = UViT(
                     img_size=32,
                     patch_size=2,
@@ -538,15 +545,22 @@ class DPSGuidance(BaseGuidance):
                     mlp_time_embed=False,
                     num_classes=-1,
                     norm_layer=torch.nn.LayerNorm,
-                    use_checkpoint=False
+                    use_checkpoint=False,
+                    early_exit=self.use_early_exit if hasattr(self, 'use_early_exit') else False,
+                    early_exit_layer=self.early_exit_layer if hasattr(self, 'early_exit_layer') else None
                 ).to(x.device)
+                
+                # 모델 가중치 로드
                 state_dict = torch.load(model_name_or_path, map_location=x.device)
                 self._uvit_model.load_state_dict(state_dict)
                 self._uvit_model.eval()
             
             # SDE 설정
             sde_obj = VPSDE(beta_min=0.1, beta_max=20)
+            
+            # score_model 설정 (하나의 모델 사용)
             score_model = ScoreModel(self._uvit_model, pred='noise_pred', sde=sde_obj)
+            
             rsde = ReverseSDE(score_model)
             
             # SDE timesteps 설정
@@ -567,23 +581,46 @@ class DPSGuidance(BaseGuidance):
             
             target_class = class_labels[0].item() if class_labels is not None else 1000
             
+            # start_gradient 체크: 해당 step 이후에만 gradient 적용
+            if start_gradient is not None and t_idx < start_gradient:
+                print(f"[INFO] Step {t_idx} < start_gradient ({start_gradient}), skipping gradient guidance")
+                # Unconditional prediction만 수행
+                with torch.no_grad():
+                    drift = rsde.drift(x, t_val)
+                    diffusion = rsde.diffusion(t_val)
+                    dt = s - t_val
+                    mean = x + drift * dt
+                    sigma = diffusion * (-dt).sqrt()
+                    x_next = mean + sigma * torch.randn_like(x)
+                    return x_next
+            
             # DPS: x_t -> x_0 -> classifier -> gradient
             x_with_grad = x.detach().clone().requires_grad_(True)
-            x0_pred = score_model.x0_pred(x_with_grad, t_val)
+            
+            # Early exit 여부에 따라 x0_pred 계산
+            if hasattr(self, 'use_early_exit') and self.use_early_exit:
+                # Early exit 사용 (gradient 계산용)
+                x0_pred = score_model.x0_pred(x_with_grad, t_val, use_early_exit=True)
+                print(f"[DEBUG] Using early exit for gradient computation (early_exit_layer={self.early_exit_layer})")
+            else:
+                # Full transformer 사용
+                x0_pred = score_model.x0_pred(x_with_grad, t_val, use_early_exit=False)
+                print(f"[DEBUG] Using full transformer for gradient computation")
             
             # NaN/Inf 체크
             if torch.isnan(x0_pred).any() or torch.isinf(x0_pred).any():
                 print(f'[ERROR] x0_pred contains NaN/Inf! min={x0_pred.min().item()}, max={x0_pred.max().item()}')
                 grad_xt = torch.zeros_like(x)
             else:
-                print(f'[DEBUG] x0_pred stats: min={x0_pred.min().item()}, max={x0_pred.max().item()}, mean={x0_pred.mean().item()}, std={x0_pred.std().item()}')
                 # Classifier gradient 계산
                 grad_xt = self._compute_gradient_wrt_x0_uvit(x_with_grad, target_class, t_val, score_model=score_model)
                 if grad_xt is None or torch.isnan(grad_xt).any() or torch.isinf(grad_xt).any():
                     print(f"[WARNING] grad_xt contains NaN/Inf, using zero gradient")
                     grad_xt = torch.zeros_like(x)
             
-            print(f"[DEBUG] t_val: {t_val:.4f}, x norm: {x.norm():.4f}, grad_xt norm: {grad_xt.norm():.4f}")
+            # guidance_scale이 None이면 기본값 사용
+            if guidance_scale is None:
+                guidance_scale = 1.0
             
             # Classifier 확률값 디버깅
             with torch.no_grad():
@@ -622,9 +659,8 @@ class DPSGuidance(BaseGuidance):
                             print(f"[DEBUG] Classifier Results (t={t_val:.4f}):")
                             print(f"  Target class ({target_class_name}): prob={target_probs.mean().item():.4f} (min={target_probs.min().item():.4f}, max={target_probs.max().item():.4f})")
                             
-                            # 모든 샘플의 frog 확률값 출력
-                            frog_probs = all_probs[:, target_class]  # frog = class 6
-                            print(f"  All samples frog probs: {[f'{prob:.4f}' for prob in frog_probs.cpu().numpy()]}")
+                            frog_probs = all_probs[:, target_class]  
+                            print(f"  All samples probs: {[f'{prob:.4f}' for prob in frog_probs.cpu().numpy()]}")
                             
                             # Top-3 클래스 확률
                             top3_probs, top3_indices = torch.topk(all_probs.mean(dim=0), 3)
@@ -640,16 +676,19 @@ class DPSGuidance(BaseGuidance):
                 else:
                     print(f"[DEBUG] Classifier not found")
             
-            # SDE step with DPS guidance
+            # SDE step 계산용 rsde (항상 full transformer 사용)
+            sde_rsde = ReverseSDE(score_model)
+            
+            # SDE step 계산 (항상 full transformer 사용)
             with torch.no_grad():
-                drift = rsde.drift(x, t_val)
-                diffusion = rsde.diffusion(t_val)
+                print(f"[DEBUG] SDE step: using full transformer (guidance_scale={guidance_scale})")
+                drift = sde_rsde.drift(x, t_val, use_early_exit=False)  # full transformer 강제
+                diffusion = sde_rsde.diffusion(t_val)
                 dt = s - t_val
                 mean = x + drift * dt
                 sigma = diffusion * (-dt).sqrt()
                 
-                                # DPS guidance 적용
-                guidance_scale = 1.0  # DPS guidance 활성화
+                # DPS guidance 적용
                 x_next = mean + sigma * torch.randn_like(x) + guidance_scale * (sigma**2) * grad_xt
                 
                 if torch.isnan(x_next).any() or torch.isinf(x_next).any():
@@ -838,7 +877,16 @@ class DPSGuidance(BaseGuidance):
             # 2. x_0 복원 (score_model 필요)
             if score_model is None:
                 raise ValueError('score_model must be provided for x_t -> x_0 변환')
-            x0_pred = score_model.x0_pred(x_t, t)
+            
+            # Early exit을 사용하여 x0_pred 계산
+            if hasattr(self, 'use_early_exit') and self.use_early_exit:
+                # Early exit 사용
+                x0_pred = score_model.x0_pred(x_t, t, use_early_exit=True)
+                print(f"[DEBUG] Using early exit for gradient computation (early_exit_layer={self.early_exit_layer})")
+            else:
+                # Full transformer 사용
+                x0_pred = score_model.x0_pred(x_t, t, use_early_exit=False)
+                print(f"[DEBUG] Using full transformer for gradient computation")
             x0_img = x0_pred.clamp(-1, 1)
             x0_img = (x0_img + 1) / 2
             x0_img = x0_img.clamp(0, 1)

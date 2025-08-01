@@ -27,6 +27,10 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an [N x dim] Tensor of positional embeddings.
     """
+    # timesteps가 스칼라인 경우 처리
+    if timesteps.dim() == 0:
+        timesteps = timesteps.unsqueeze(0)
+    
     half = dim // 2
     freqs = torch.exp(
         -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
@@ -138,11 +142,15 @@ class PatchEmbed(nn.Module):
 class UViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
                  qkv_bias=False, qk_scale=None, norm_layer=nn.LayerNorm, mlp_time_embed=False, num_classes=-1,
-                 use_checkpoint=False, conv=True, skip=True):
+                 use_checkpoint=False, conv=True, skip=True, early_exit=False, early_exit_layer=None):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_classes = num_classes
         self.in_chans = in_chans
+        
+        # Early exit 설정
+        self.early_exit = early_exit
+        self.early_exit_layer = early_exit_layer if early_exit_layer is not None else depth // 4  # 기본값: depth의 1/4
 
         self.patch_embed = PatchEmbed(patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = (img_size // patch_size) ** 2
@@ -198,12 +206,19 @@ class UViT(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed'}
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, y=None, use_early_exit=None):
+        # use_early_exit이 None이면 self.early_exit 사용, 아니면 파라미터 값 사용
+        if use_early_exit is None:
+            use_early_exit = self.early_exit
+            
         x = self.patch_embed(x)
         B, L, D = x.shape
 
         time_token = self.time_embed(timestep_embedding(timesteps, self.embed_dim))
         time_token = time_token.unsqueeze(dim=1)
+        # time_token을 batch size에 맞게 확장
+        if time_token.size(0) == 1 and x.size(0) > 1:
+            time_token = time_token.expand(x.size(0), -1, -1)
         x = torch.cat((time_token, x), dim=1)
         if y is not None:
             label_emb = self.label_emb(y)
@@ -212,12 +227,41 @@ class UViT(nn.Module):
         x = x + self.pos_embed
 
         skips = []
-        for blk in self.in_blocks:
+        
+        # In blocks 처리
+        for i, blk in enumerate(self.in_blocks):
             x = blk(x)
             skips.append(x)
+            
+                    # Early exit 체크 (in_blocks 중간에서) - early_exit_layer가 depth보다 작을 때만
+        if use_early_exit and self.early_exit_layer < 12 and i >= self.early_exit_layer - 1:
+            # Early exit: 중간 결과를 바로 decoder로 전달
+            print(f"[DEBUG] Early exit at layer {i+1} (early_exit_layer={self.early_exit_layer})")
+            x = self.norm(x)
+            x = self.decoder_pred(x)
+            assert x.size(1) == self.extras + L
+            x = x[:, self.extras:, :]
+            x = unpatchify(x, self.in_chans)
+            x = self.final_layer(x)
+            return x
 
+        # Mid block 처리
         x = self.mid_block(x)
+        
+        # Early exit 체크 (mid block 후) - early_exit_layer가 depth보다 작을 때만
+        if use_early_exit and self.early_exit_layer < 12 and self.early_exit_layer <= len(self.in_blocks):
+            print(f"[DEBUG] Early exit at mid block (early_exit_layer={self.early_exit_layer}, len(in_blocks)={len(self.in_blocks)})")
+            x = self.norm(x)
+            x = self.decoder_pred(x)
+            assert x.size(1) == self.extras + L
+            x = x[:, self.extras:, :]
+            x = unpatchify(x, self.in_chans)
+            x = self.final_layer(x)
+            return x
+        elif use_early_exit:
+            print(f"[DEBUG] Skipping early exit at mid block (early_exit_layer={self.early_exit_layer}, len(in_blocks)={len(self.in_blocks)})")
 
+        # Out blocks 처리 (full transformer)
         for blk in self.out_blocks:
             x = blk(x, skips.pop())
 

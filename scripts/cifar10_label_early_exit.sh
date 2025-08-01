@@ -8,7 +8,7 @@ guide_network='resnet_cifar10.pt'
 train_steps=1000
 inference_steps=50
 eta=1.0
-target=8
+target=6
 clip_x0=True
 seed=40
 logging_dir='logs'
@@ -26,6 +26,10 @@ sigma=0.001
 eps_bsz=1
 iter_steps=4
 guidance_scale=2.0
+
+# Early exit 설정
+use_early_exit=True
+early_exit_layer=7  # decode layer의 5번째 layer에서 early exit (총 6개 decode layer 중 5번째)
 
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --data_type $data_type \
@@ -53,6 +57,6 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python main.py \
     --num_samples $num_samples \
     --guidance_name $guidance_name \
     --eval_batch_size $eval_batch_size \
-    --log_traj $log_traj
-
-
+    --log_traj $log_traj \
+    --use_early_exit $use_early_exit \
+    --early_exit_layer $early_exit_layer 

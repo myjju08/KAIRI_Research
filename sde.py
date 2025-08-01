@@ -171,6 +171,16 @@ class ScoreModel(object):
         t = t.to(xt.device)
         if t.dim() == 0:
             t = duplicate(t, xt.size(0))
+        
+        # UViT 모델에 early exit 파라미터 전달
+        if hasattr(self.nnet, 'early_exit'):
+            # early exit 설정이 있으면 전달
+            use_early_exit = kwargs.get('use_early_exit', None)
+            if use_early_exit is not None:
+                # kwargs에서 use_early_exit 제거하여 중복 전달 방지
+                kwargs_without_early_exit = {k: v for k, v in kwargs.items() if k != 'use_early_exit'}
+                return self.nnet(xt, t * 999, use_early_exit=use_early_exit, **kwargs_without_early_exit)
+        
         return self.nnet(xt, t * 999, **kwargs)  # follow SDE
 
     def noise_pred(self, xt, t, **kwargs):
@@ -186,28 +196,7 @@ class ScoreModel(object):
     def x0_pred(self, xt, t, **kwargs):
         pred = self.predict(xt, t, **kwargs)
         if self.pred == 'noise_pred':
-            # UViT 모델 예측값 디버깅
-            print(f'[DEBUG] UViT pred stats: min={pred.min().item()}, max={pred.max().item()}, mean={pred.mean().item()}, std={pred.std().item()}')
-            print(f'[DEBUG] UViT pred contains NaN: {torch.isnan(pred).any()}')
-            print(f'[DEBUG] UViT pred contains Inf: {torch.isinf(pred).any()}')
-            
-            # SDE 값들 디버깅
-            cum_alpha = self.sde.cum_alpha(t)
-            nsr = self.sde.nsr(t)
-            print(f'[DEBUG] cum_alpha: {cum_alpha}, contains NaN: {torch.isnan(cum_alpha).any()}')
-            print(f'[DEBUG] nsr: {nsr}, contains NaN: {torch.isnan(nsr).any()}')
-            
-            # x0_pred 계산 전 값들 확인
-            term1 = stp(cum_alpha.rsqrt(), xt)
-            term2 = stp(nsr.sqrt(), pred)
-            print(f'[DEBUG] term1 stats: min={term1.min().item()}, max={term1.max().item()}, mean={term1.mean().item()}')
-            print(f'[DEBUG] term2 stats: min={term2.min().item()}, max={term2.max().item()}, mean={term2.mean().item()}')
-            
-            x0_pred = term1 - term2
-            
-            print(f'[DEBUG] x0_pred stats: min={x0_pred.min().item()}, max={x0_pred.max().item()}, mean={x0_pred.mean().item()}, std={x0_pred.std().item()}')
-            print(f'[DEBUG] x0_pred contains NaN: {torch.isnan(x0_pred).any()}')
-            print(f'[DEBUG] x0_pred contains Inf: {torch.isinf(x0_pred).any()}')
+            x0_pred = stp(self.sde.cum_alpha(t).rsqrt(), xt) - stp(self.sde.nsr(t).sqrt(), pred)
         elif self.pred == 'x0_pred':
             x0_pred = pred
         else:
