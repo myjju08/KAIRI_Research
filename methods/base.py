@@ -99,6 +99,9 @@ class BaseGuidance:
             
             # Generate noise and add it
             noise = torch.randn_like(xt)
+            # sigma와 nonzero_mask를 xt와 같은 디바이스로 이동
+            sigma = sigma.to(xt.device)
+            nonzero_mask = nonzero_mask.to(xt.device)
             mean_pred = mean_pred + nonzero_mask * sigma * noise
         
         return mean_pred

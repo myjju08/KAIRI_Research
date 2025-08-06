@@ -142,7 +142,8 @@ class PatchEmbed(nn.Module):
 class UViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
                  qkv_bias=False, qk_scale=None, norm_layer=nn.LayerNorm, mlp_time_embed=False, num_classes=-1,
-                 use_checkpoint=False, conv=True, skip=True, early_exit=False, early_exit_layer=None):
+                 use_checkpoint=False, conv=True, skip=True, early_exit=False, early_exit_layer=None,
+                 use_time_based_early_exit=False, time_early_exit_mapping=None):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_classes = num_classes
@@ -151,6 +152,10 @@ class UViT(nn.Module):
         # Early exit 설정
         self.early_exit = early_exit
         self.early_exit_layer = early_exit_layer if early_exit_layer is not None else depth // 4  # 기본값: depth의 1/4
+        
+        # Time-based early exit 설정
+        self.use_time_based_early_exit = use_time_based_early_exit
+        self.time_early_exit_mapping = time_early_exit_mapping
 
         self.patch_embed = PatchEmbed(patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = (img_size // patch_size) ** 2
@@ -207,9 +212,16 @@ class UViT(nn.Module):
         return {'pos_embed'}
 
     def forward(self, x, timesteps, y=None, use_early_exit=None):
-        # use_early_exit이 None이면 self.early_exit 사용, 아니면 파라미터 값 사용
+        # 파라미터로 전달된 use_early_exit을 우선 사용
         if use_early_exit is None:
             use_early_exit = self.early_exit
+            
+        # Time-based early exit인 경우 early_exit_layer를 동적으로 설정
+        if hasattr(self, 'use_time_based_early_exit') and self.use_time_based_early_exit:
+            current_early_exit_layer = self._get_early_exit_layer_for_timestep(timesteps[0].item())
+            if current_early_exit_layer is not None:
+                self.early_exit_layer = current_early_exit_layer
+                print(f"[DEBUG] Time-based early exit: timestep {timesteps[0].item()} -> early_exit_layer {current_early_exit_layer}")
             
         x = self.patch_embed(x)
         B, L, D = x.shape
@@ -228,42 +240,29 @@ class UViT(nn.Module):
 
         skips = []
         
-        # In blocks 처리
+        # In blocks 처리 (Encoder)
         for i, blk in enumerate(self.in_blocks):
             x = blk(x)
             skips.append(x)
-            
-                    # Early exit 체크 (in_blocks 중간에서) - early_exit_layer가 depth보다 작을 때만
-        if use_early_exit and self.early_exit_layer < 12 and i >= self.early_exit_layer - 1:
-            # Early exit: 중간 결과를 바로 decoder로 전달
-            print(f"[DEBUG] Early exit at layer {i+1} (early_exit_layer={self.early_exit_layer})")
-            x = self.norm(x)
-            x = self.decoder_pred(x)
-            assert x.size(1) == self.extras + L
-            x = x[:, self.extras:, :]
-            x = unpatchify(x, self.in_chans)
-            x = self.final_layer(x)
-            return x
 
         # Mid block 처리
         x = self.mid_block(x)
         
-        # Early exit 체크 (mid block 후) - early_exit_layer가 depth보다 작을 때만
-        if use_early_exit and self.early_exit_layer < 12 and self.early_exit_layer <= len(self.in_blocks):
-            print(f"[DEBUG] Early exit at mid block (early_exit_layer={self.early_exit_layer}, len(in_blocks)={len(self.in_blocks)})")
-            x = self.norm(x)
-            x = self.decoder_pred(x)
-            assert x.size(1) == self.extras + L
-            x = x[:, self.extras:, :]
-            x = unpatchify(x, self.in_chans)
-            x = self.final_layer(x)
-            return x
-        elif use_early_exit:
-            print(f"[DEBUG] Skipping early exit at mid block (early_exit_layer={self.early_exit_layer}, len(in_blocks)={len(self.in_blocks)})")
-
-        # Out blocks 처리 (full transformer)
-        for blk in self.out_blocks:
+        # Out blocks 처리 (Decoder) - 여기서만 early exit
+        for i, blk in enumerate(self.out_blocks):
             x = blk(x, skips.pop())
+            
+            # 기존 early exit 체크 (decoder에서만) - early_exit_layer 이후에 early exit
+            if use_early_exit and self.early_exit_layer is not None and i >= self.early_exit_layer:
+                print(f"[DEBUG] Early exit at decoder layer {i+1} (early_exit_layer={self.early_exit_layer})")
+                # Early exit: 현재 상태에서 바로 출력 (완전한 출력 처리)
+                x = self.norm(x)
+                x = self.decoder_pred(x)
+                assert x.size(1) == self.extras + L
+                x = x[:, self.extras:, :]
+                x = unpatchify(x, self.in_chans)
+                x = self.final_layer(x)
+                return x
 
         x = self.norm(x)
         x = self.decoder_pred(x)
@@ -272,3 +271,41 @@ class UViT(nn.Module):
         x = unpatchify(x, self.in_chans)
         x = self.final_layer(x)
         return x
+
+    def _get_early_exit_layer_for_timestep(self, timestep):
+        """Time step에 따라 early exit layer를 결정"""
+        if not hasattr(self, 'use_time_based_early_exit') or self.use_time_based_early_exit is False:
+            return None
+            
+        # 실제 timestep 범위 확인 (denoising: 50→0)
+        # timestep이 1000 스케일로 나오는지 확인
+        print(f"[DEBUG] Raw timestep: {timestep}")
+        
+        # timestep이 이미 50 스케일인지 확인
+        if timestep <= 50:
+            normalized_timestep = int(timestep)
+        else:
+            # 1000~0 범위를 50~0으로 선형 매핑 (denoising 방향)
+            normalized_timestep = int(timestep * 50 / 1000)
+        
+        print(f"[DEBUG] Normalized timestep: {normalized_timestep}")
+        
+        # 문자열에서 dict 파싱
+        try:
+            import ast
+            mapping_dict = ast.literal_eval(self.time_early_exit_mapping)
+            print(f"[DEBUG] Mapping dict: {mapping_dict}")
+        except:
+            print(f"Error parsing time_early_exit_mapping: {self.time_early_exit_mapping}")
+            return None
+        
+        # mapping에 따라 early exit layer 결정
+        for time_range, layer in mapping_dict.items():
+            start, end = time_range
+            if start <= normalized_timestep <= end:
+                print(f"[DEBUG] Timestep {normalized_timestep} -> Early exit layer {layer}")
+                return layer
+        
+        # 매핑에 없는 경우 기본값 반환
+        print(f"[DEBUG] No mapping found for timestep {normalized_timestep}, using default")
+        return None

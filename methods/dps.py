@@ -461,6 +461,8 @@ class DPSGuidance(BaseGuidance):
         # Early exit 설정
         self.use_early_exit = getattr(args, 'use_early_exit', False)
         self.early_exit_layer = getattr(args, 'early_exit_layer', None)
+        self.use_time_based_early_exit = getattr(args, 'use_time_based_early_exit', False)
+        self.time_early_exit_mapping = getattr(args, 'time_early_exit_mapping', None)
         
         # diffusion 인스턴스가 넘어오면 그 속성 사용 (UViT 샘플러 지원)
         if diffusion is not None:
@@ -547,7 +549,9 @@ class DPSGuidance(BaseGuidance):
                     norm_layer=torch.nn.LayerNorm,
                     use_checkpoint=False,
                     early_exit=self.use_early_exit if hasattr(self, 'use_early_exit') else False,
-                    early_exit_layer=self.early_exit_layer if hasattr(self, 'early_exit_layer') else None
+                    early_exit_layer=self.early_exit_layer if hasattr(self, 'early_exit_layer') else None,
+                    use_time_based_early_exit=self.use_time_based_early_exit if hasattr(self, 'use_time_based_early_exit') else False,
+                    time_early_exit_mapping=self.time_early_exit_mapping if hasattr(self, 'time_early_exit_mapping') else None
                 ).to(x.device)
                 
                 # 모델 가중치 로드
@@ -579,10 +583,10 @@ class DPSGuidance(BaseGuidance):
                 print(f"[WARNING] t_val={t_val:.4f} >= 1.0, skipping step")
                 return x
             
-            target_class = class_labels[0].item() if class_labels is not None else 1000
+            target_class = class_labels[0].item() if class_labels is not None else int(self.args.target)
             
             # start_gradient 체크: 해당 step 이후에만 gradient 적용
-            if start_gradient is not None and t_idx < start_gradient:
+            if start_gradient is not None and t_idx >= start_gradient:
                 print(f"[INFO] Step {t_idx} < start_gradient ({start_gradient}), skipping gradient guidance")
                 # Unconditional prediction만 수행
                 with torch.no_grad():
@@ -701,11 +705,11 @@ class DPSGuidance(BaseGuidance):
 
         elif model_type in ['transformer']:
             # 기존 DiT step 함수 (기존 코드)
-            # 타겟 클래스 사용 (class_labels가 None이면 1000 사용)
+            # 타겟 클래스 사용 (class_labels가 None이면 args.target 사용)
             if class_labels is not None:
-                target_class = class_labels[0].item() if len(class_labels) > 0 else 1000
+                target_class = class_labels[0].item() if len(class_labels) > 0 else int(self.args.target)
             else:
-                target_class = 1000
+                target_class = int(self.args.target)
             
             # 1. Predict x0 from current x_t using the diffusion model
             out = self.diffusion_obj.p_sample(
@@ -784,6 +788,41 @@ class DPSGuidance(BaseGuidance):
             
             out["sample"] = x_prev.float()
             return out
+        
+        elif model_type in ['unet', 'transformer'] or model_type is None:
+            # UNet/Transformer/기본 모델 처리
+            # alpha_prod_ts, alpha_prod_t_prevs가 None인 경우 diffusion 스케줄에서 계산
+            if alpha_prod_ts is None or alpha_prod_t_prevs is None:
+                if hasattr(self, 'alphas_cumprod'):
+                    # diffusion 스케줄에서 직접 계산
+                    t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
+                    alpha_prod_t = torch.tensor(self.alphas_cumprod[t_idx], device=x.device, dtype=x.dtype)
+                    alpha_prod_t_prev = torch.tensor(self.alphas_cumprod_prev[t_idx], device=x.device, dtype=x.dtype)
+                else:
+                    # 기본값 사용 (DDPM 스케줄)
+                    print("[WARNING] No diffusion schedule found, using default values")
+                    alpha_prod_t = torch.tensor(0.9, device=x.device, dtype=x.dtype)
+                    alpha_prod_t_prev = torch.tensor(0.8, device=x.device, dtype=x.dtype)
+            else:
+                alpha_prod_t = alpha_prod_ts[t]
+                alpha_prod_t_prev = alpha_prod_t_prevs[t]
+            
+            t = ts[t] if ts is not None else t
+
+            epsilon = model(x, t)
+            x_prev = self._predict_x_prev_from_eps(x, epsilon, alpha_prod_t, alpha_prod_t_prev, eta, t, **kwargs)
+
+            # model을 unet으로 사용 (변수명 수정)
+            func = lambda zt: (zt - (1 - alpha_prod_t) ** (0.5) * model(zt, t)) / (alpha_prod_t ** (0.5))
+
+            guidance = self.guider.get_guidance(x.clone().detach().requires_grad_(), func, **kwargs)
+            
+            # follow the schedule of DPS paper
+            logp_norm = self.guider.get_guidance(x.clone().detach(), func, return_logp=True, check_grad=False, **kwargs)
+            
+            x_prev = x_prev + self.args.guidance_strength * guidance / torch.abs(logp_norm.view(-1, * ([1] * (len(x_prev.shape) - 1)) ))
+
+            return x_prev
 
     def _compute_gradient_wrt_z_t(
         self, 

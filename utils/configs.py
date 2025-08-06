@@ -35,6 +35,7 @@ class Arguments:
 
     # model related
     model_name_or_path: str = field(default='google/ddpm-cifar10-32')
+    model_type: Optional[str] = field(default=None)
 
     # VAE related (same as DiT)
     vae: str = field(default='mse')  # 'mse' or 'ema', same as DiT
@@ -63,11 +64,13 @@ class Arguments:
     iter_steps: int = field(default=1)
     guidance_strength: float = field(default=1.0)
     guidance_scale: float = field(default=1.0)
-    start_gradient: int = field(default=0)
+    start_gradient: int = field(default=50)
     
     # early exit related
     use_early_exit: bool = field(default=False)
     early_exit_layer: Optional[int] = field(default=None)
+    use_time_based_early_exit: bool = field(default=False)
+    time_early_exit_mapping: Optional[str] = field(default=None)
 
     # specific for our method
     rho: float = field(default=1.0)

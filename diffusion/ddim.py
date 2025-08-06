@@ -456,6 +456,33 @@ class SpacedDiffusion(GaussianDiffusion):
 # DPSGuidance 클래스는 methods/dps.py에서 import하여 사용
 # 중복된 DPSGuidance 클래스 제거 - 실제로는 methods/dps.py의 DPSGuidance가 사용됨
 
+import functools
+import math
+import torch
+from torchvision.transforms.functional import to_tensor
+from PIL import Image
+from tqdm import tqdm
+from typing import List, Any, Union, Tuple
+import numpy as np
+import os
+import torch.nn as nn
+
+from diffusers.utils.torch_utils import randn_tensor
+
+from utils.configs import Arguments
+from .base import BaseSampler
+from methods.base import BaseGuidance
+import logger
+
+from tasks.networks.qm9 import dataset
+from tasks.networks.qm9.utils import compute_mean_mad
+from tasks.networks.qm9.datasets_config import get_dataset_info
+from tasks.networks.qm9.models import DistributionProperty, DistributionNodes
+from tasks.networks.egnn.EDM import EDM
+from tasks.networks.egnn.EGNN import EGNN_dynamics_QM9
+from tasks.networks.egnn.utils import assert_correctly_masked, assert_mean_zero_with_mask
+
+
 class ImageSampler(BaseSampler):
 
     def __init__(self, args: Arguments):
@@ -463,31 +490,35 @@ class ImageSampler(BaseSampler):
         self.args = args
         self.inference_steps = args.inference_steps
         self.device = args.device
-        self.target = args.target  # target 값 저장
-        self.model_type = None
-        if 'uvit' in args.model_name_or_path.lower():
-            self.model_type = 'uvit'
-        elif 'transformer' in args.model_name_or_path.lower():
-            self.model_type = 'transformer'
+        self.target = args.target
+        self.object_size = (3, args.image_size, args.image_size)
+        self.eta = args.eta
+        self.log_traj = args.log_traj
+        self.generator = torch.manual_seed(self.seed)
+        
+        # model_type 결정
+        if hasattr(args, 'model_type') and args.model_type is not None:
+            self.model_type = args.model_type
         else:
-            self.model_type = 'unet'
+            # 기존 로직: model_name_or_path 기반 추정
+            if 'uvit' in args.model_name_or_path.lower():
+                self.model_type = 'uvit'
+            elif 'transformer' in args.model_name_or_path.lower():
+                self.model_type = 'transformer'
+            else:
+                self.model_type = 'unet'
+        
         self.model_name_or_path = args.model_name_or_path
-        if self.model_type == 'uvit':
-            self.image_size = 32
-        elif self.model_type == 'transformer':
-            self.image_size = args.image_size
-            self.object_size = (4, args.image_size // 8, args.image_size // 8)
-            self.use_vae = True
-        else:
-            self.image_size = args.image_size
-            self.object_size = (3, args.image_size, args.image_size)
-            self.use_vae = False
         self._build_diffusion(args)
 
     def _build_diffusion(self, args):
-        if 'uvit' in args.model_name_or_path.lower():
-            # U-ViT 모델 로드
+        '''
+            Different diffusion models should be registered here
+        '''
+        if self.model_type == 'uvit':
+            # UViT 모델 로드
             from libs.uvit import UViT
+            self.image_size = 32  # UViT용 image_size 설정
             self.model = UViT(
                 img_size=32,
                 patch_size=2,
@@ -498,24 +529,26 @@ class ImageSampler(BaseSampler):
                 mlp_ratio=4,
                 qkv_bias=False,
                 mlp_time_embed=False,
-                num_classes=-1,  # None 대신 -1
+                num_classes=-1,
                 norm_layer=nn.LayerNorm,
                 use_checkpoint=False
             ).to(args.device)
-            # checkpoint 로드 (strict=True)
+            
+            # checkpoint 로드
             checkpoint_path = args.model_name_or_path
-            # models 디렉토리에서 체크포인트 찾기
             if not os.path.exists(checkpoint_path):
                 models_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', checkpoint_path)
                 if os.path.exists(models_path):
                     checkpoint_path = models_path
                 else:
                     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path} or {models_path}")
+            
             checkpoint = torch.load(checkpoint_path, map_location=args.device)
             state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
             self.model.load_state_dict(state_dict, strict=True)
             self.model.eval()
-            # U-ViT 샘플러/스케줄러 분리 적용
+            
+            # UViT SDE 설정
             from sde import VPSDE, ScoreModel, ReverseSDE
             self.sde = VPSDE()
             self.score_model = ScoreModel(self.model, pred='noise_pred', sde=self.sde)
@@ -549,82 +582,31 @@ class ImageSampler(BaseSampler):
                     )
                 return x
             self.sample = uvit_sample_fn
-        elif 'transformer' in args.model_name_or_path.lower():
-            # DiT (Imagenet) 분기 (기존 코드)
+            
+        elif self.model_type == 'transformer':
+            # DiT (Transformer) 모델 로드
             from .transformer.openai import create_diffusion, DiT_models
             from diffusers.models import AutoencoderKL
+            
             latent_size = args.image_size // 8
             self.model = DiT_models['DiT-XL/2'](
                 input_size=latent_size,
                 num_classes=1000
             ).to(args.device)
             self.model.initialize_weights()
-            checkpoint_path = args.model_name_or_path
-            # models 디렉토리에서 체크포인트 찾기
-            if not os.path.exists(checkpoint_path):
-                models_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', checkpoint_path)
-                if os.path.exists(models_path):
-                    checkpoint_path = models_path
-                else:
-                    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path} or {models_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=args.device)
-            state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-            self.model.load_state_dict(state_dict, strict=True)
-            self.model.eval()
             
             # VAE 로드
-            vae_path = os.path.join(os.path.dirname(args.model_name_or_path), 'vae')
-            if os.path.exists(vae_path):
-                self.vae = AutoencoderKL.from_pretrained(vae_path).to(args.device)
-            else:
-                self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(args.device)
-            self.vae.eval()
+            self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(args.device)
             
-            # Diffusion 설정
-            self.diffusion = create_diffusion(timestep_respacing=str(args.inference_steps))
-            
-            def transformer_sample_fn(sample_size, guidance):
-                n = sample_size
-                device = self.device
-                # DiT는 latent space에서 샘플링
-                x = torch.randn(n, 4, latent_size, latent_size, device=device)
-                
-                # target 값을 class_labels로 변환
-                class_labels = None
-                if hasattr(self, 'args') and hasattr(self.args, 'target') and self.args.target is not None:
-                    try:
-                        target_class = int(self.args.target)
-                        class_labels = torch.full((n,), target_class, device=device, dtype=torch.long)
-                    except (ValueError, TypeError):
-                        pass
-                
-                for t_idx in reversed(range(self.inference_steps)):
-                    t = torch.full((n,), t_idx, device=device, dtype=torch.long)
-                    start_gradient_value = getattr(self.args, 'start_gradient', None)
-                    x = guidance.guide_step(
-                        x, t, self.model, None, None, None, 0.0,
-                        class_labels=class_labels, cfg_scale=0.0, diffusion=self.diffusion,
-                        model_type='transformer', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
-                        start_gradient=start_gradient_value
-                    )
-                return x
-            self.sample = transformer_sample_fn
-        else:
-            # UNet 분기 (기존 코드)
-            from .transformer.openai import create_diffusion, DiT_models
-            self.model = DiT_models['DiT-XL/2'](
-                input_size=args.image_size,
-                num_classes=1000
-            ).to(args.device)
-            self.model.initialize_weights()
+            # checkpoint 로드
             checkpoint_path = args.model_name_or_path
-            # models 디렉토리에서 체크포인트 찾기
             if not os.path.exists(checkpoint_path):
                 models_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', checkpoint_path)
                 if os.path.exists(models_path):
                     checkpoint_path = models_path
                 else:
                     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path} or {models_path}")
+            
             checkpoint = torch.load(checkpoint_path, map_location=args.device)
             state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
             self.model.load_state_dict(state_dict, strict=True)
@@ -633,41 +615,77 @@ class ImageSampler(BaseSampler):
             # Diffusion 설정
             self.diffusion = create_diffusion(timestep_respacing=str(args.inference_steps))
             
-            def unet_sample_fn(sample_size, guidance):
-                n = sample_size
-                device = self.device
-                # UNet는 pixel space에서 샘플링
-                x = torch.randn(n, 3, args.image_size, args.image_size, device=device)
-                
-                # target 값을 class_labels로 변환
-                class_labels = None
-                if hasattr(self, 'args') and hasattr(self.args, 'target') and self.args.target is not None:
-                    try:
-                        target_class = int(self.args.target)
-                        class_labels = torch.full((n,), target_class, device=device, dtype=torch.long)
-                    except (ValueError, TypeError):
-                        pass
-                
-                for t_idx in reversed(range(self.inference_steps)):
-                    t = torch.full((n,), t_idx, device=device, dtype=torch.long)
-                    start_gradient_value = getattr(self.args, 'start_gradient', None)
-                    x = guidance.guide_step(
-                        x, t, self.model, None, None, None, 0.0,
-                        class_labels=class_labels, cfg_scale=0.0, diffusion=self.diffusion,
-                        model_type='unet', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
-                        start_gradient=start_gradient_value
-                    )
-                return x
-            self.sample = unet_sample_fn
+        else:
+            # UNet 모델 로드 (기본)
+            if 'openai' in args.model_name_or_path:
+                from .unet.openai import get_diffusion
+            else: 
+                from .unet.huggingface import get_diffusion
+            
+            self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
 
     @torch.no_grad()
     def sample(self, sample_size: int, guidance: BaseGuidance):
-        return self.sample(sample_size, guidance)
+        # UViT는 자체 sample 함수를 사용
+        if self.model_type == 'uvit':
+            return self.sample(sample_size, guidance)
+        
+        # UNet과 Transformer는 통합된 샘플링 로직 사용
+        tot_samples = []
+        n_batchs = math.ceil(sample_size / self.per_sample_batch_size)
+
+        for batch_id in range(n_batchs):
+            
+            self.args.batch_id = batch_id
+
+            if self.model_type == 'transformer':
+                # Transformer 샘플링
+                batch_size = min(self.per_sample_batch_size, sample_size - batch_id * self.per_sample_batch_size)
+                x = torch.randn(batch_size, 4, self.args.image_size // 8, self.args.image_size // 8, device=self.device)
+                
+                for t_idx in reversed(range(self.inference_steps)):
+                    t = torch.full((batch_size,), t_idx, device=self.device, dtype=torch.long)
+                    x = guidance.guide_step(
+                        x, t, self.model, None, None, None, self.eta,
+                        model_type='transformer', model_name_or_path=self.model_name_or_path, 
+                        image_size=self.args.image_size, diffusion=self.diffusion
+                    )
+                    
+                    if self.log_traj:
+                        logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t_idx}')
+                
+                # VAE decode
+                x = self.vae.decode(x / 0.18215, return_dict=False)[0]
+                
+            else:
+                # UNet 샘플링 (기본)
+                batch_size = min(self.per_sample_batch_size, sample_size - batch_id * self.per_sample_batch_size)
+                x = randn_tensor(
+                    shape=(batch_size, *self.object_size),
+                    generator=self.generator,
+                    device=self.device,
+                )
+
+                for t in tqdm(range(self.inference_steps), total=self.inference_steps):
+                    
+                    x = guidance.guide_step(
+                        x, t, self.unet,
+                        self.ts,
+                        self.alpha_prod_ts, 
+                        self.alpha_prod_t_prevs,
+                        self.eta,
+                        model_type='unet'
+                    )
+
+                    if self.log_traj:
+                        logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')
+
+            tot_samples.append(x)
+        
+        return torch.concat(tot_samples)
 
     @staticmethod
     def tensor_to_obj(x):
-        # DiT VAE decode output is already in [-1, 1] range
-        # Convert to [0, 1] range for PIL image conversion
         if isinstance(x, torch.Tensor):
             x = x.detach().cpu()
             # Convert from [-1, 1] to [0, 1]
@@ -685,105 +703,273 @@ class ImageSampler(BaseSampler):
 
     @staticmethod
     def obj_to_tensor(objs: List[Image.Image]) -> torch.Tensor:
-        # Convert PIL images to tensor
-        tensors = []
-        for img in objs:
-            img_array = np.array(img)
-            img_tensor = torch.from_numpy(img_array).float() / 255.0
-            img_tensor = img_tensor.permute(2, 0, 1)  # HWC to CHW
-            tensors.append(img_tensor)
-        return torch.stack(tensors)
+        '''
+            convert a list of PIL images into tensors
+        '''
+        images = [to_tensor(pil_image) for pil_image in objs]
+        tensor_images = torch.stack(images)
+        return tensor_images * 2 - 1
+
 
 class MoleculeSampler(BaseSampler):
+    """
+        This class is responsible for sampling molecules using DDIM.
+
+    """
     def __init__(self, args: Arguments):
+
         super(MoleculeSampler, self).__init__(args)
-        self.args = args
-        self.device = args.device
-        self.target = args.target
+        self.object_size = None                         # size of tensor shape
+        self.inference_steps = args.inference_steps     # number of steps to run the diffusion model
+        self.eta = args.eta                             # eta in DDIM paper
+        self.log_traj = args.log_traj
+        self.generator = torch.manual_seed(self.seed)
+        self.per_sample_batch_size = args.per_sample_batch_size
+
+        # prepare unet, prev_t, alpha_prod, alpha_prod_prev...
         self._build_diffusion(args)
+
 
     @staticmethod
     def _get_dataloader(args_gen):
-        from data.molecule import get_dataloader
-        return get_dataloader(args_gen)
+        dataloaders, charge_scale = dataset.retrieve_dataloaders(args_gen)
+        return dataloaders
 
     @staticmethod
     def _get_generator(model_path, dataloaders, device, args, property_norms):
-        from models.molecule import get_model
-        return get_model(model_path, dataloaders, device, args, property_norms)
+        dataset_info = get_dataset_info(args.args_gen.dataset, args.args_gen.remove_h)
+        model, nodes_dist, prop_dist = MoleculeSampler._get_model(
+            args.args_gen, device, dataset_info, dataloaders['train'],args.target)
+        model_state_dict = torch.load(model_path, map_location='cpu')
+        model.load_state_dict(model_state_dict)
+
+        if prop_dist is not None:
+            prop_dist.set_normalizer(property_norms)
+        return model.to(device), nodes_dist, prop_dist, dataset_info
 
     @staticmethod
     def _get_model(args, device, dataset_info, dataloader_train, target):
-        from models.molecule import get_model
-        return get_model(args, device, dataset_info, dataloader_train, target)
+        histogram = dataset_info['n_nodes']
+        in_node_nf = len(dataset_info['atom_decoder']) + int(args.include_charges)
+        # in_node_nf: the numbder of atom type
+        nodes_dist = DistributionNodes(histogram)
+
+        # pass corresponding property into the pre-defined function
+        prop_dist = DistributionProperty(dataloader_train, [target]) if target else None
+        
+        dynamics_in_node_nf = in_node_nf + 1
+    
+        net_dynamics = EGNN_dynamics_QM9(
+            in_node_nf=dynamics_in_node_nf, context_node_nf=args.context_node_nf,
+            n_dims=3, device=device, hidden_nf=args.nf,
+            act_fn=torch.nn.SiLU(), n_layers=args.n_layers,
+            attention=args.attention, tanh=args.tanh, mode=args.model, norm_constant=args.norm_constant,
+            inv_sublayers=args.inv_sublayers, sin_embedding=args.sin_embedding,
+            normalization_factor=args.normalization_factor, aggregation_method=args.aggregation_method)
+
+        vdm = EDM(
+            dynamics=net_dynamics,
+            in_node_nf=in_node_nf,
+            n_dims=3,
+            timesteps=args.diffusion_steps,
+            noise_schedule=args.diffusion_noise_schedule,
+            noise_precision=args.diffusion_noise_precision,
+            loss_type=args.diffusion_loss_type,
+            norm_values=args.normalize_factors,
+            include_charges=args.include_charges,
+        )
+
+        return vdm, nodes_dist, prop_dist
 
     def _build_diffusion(self, args):
+        '''
+            Different diffusion models should be registered here
+        '''
         # dataloader
-        dataloader_train = self._get_dataloader(args.args_gen)
-        dataloader_val = self._get_dataloader(args.args_gen)
-        dataloader_test = self._get_dataloader(args.args_gen)
-        
-        # dataset info
-        dataset_info = dataloader_train.dataset.dataset_info
-        
-        # property norms
-        property_norms = dataloader_train.dataset.normalizer
-        
-        # generator
-        self.generator = self._get_generator(
-            args.args_generators_path, 
-            [dataloader_train, dataloader_val, dataloader_test], 
-            device, 
-            args.args_gen, 
-            property_norms
+        args.args_gen.load_charges = False
+        dataloaders = self._get_dataloader(args.args_gen)
+        property_norms = compute_mean_mad(dataloaders, [args.target], args.args_gen.dataset)
+        # mean, mad = property_norms[args.property]['mean'], property_norms[args.property]['mad']
+
+        # load conditional EDM and property prediction model
+        edm, nodes_dist, prop_dist, dataset_info = self._get_generator(
+            args.generators_path, dataloaders,
+            args.device, args, property_norms,
         )
-        
-        # energy model
-        self.energy_model = self._get_model(
-            args.args_en, 
-            device, 
-            dataset_info, 
-            dataloader_train, 
-            args.target
-        )
+        self.dataset_info = dataset_info
+        self.device = args.device
+        self.args_gen = args.args_gen
+        self.nodes_dist = nodes_dist
+        self.prop_dist = prop_dist
+        self.target = args.target
+
+        self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = edm.get_scheduler_params(args)
+        self.diffusion: EDM = edm
 
     def remove_mean_with_mask(self, x, node_mask):
         # masked_max_abs_value = (x * (1 - node_mask)).abs().sum().item()
         # assert masked_max_abs_value < 1e-5, f'Error {masked_max_abs_value} too high'
+
+        N = node_mask.sum(1, keepdims=True)
+
+        mean = torch.sum(x, dim=1, keepdim=True) / N
+        x = x - mean * node_mask
         return x
 
     def noise_fn(self, x, sigma, node_mask, **kwargs):
+        """
+        Samples mean-centered normal noise for z_x, and standard normal noise for z_h.
+        """
         def sample_center_gravity_zero_gaussian_with_mask(size, device, node_mask):
-            noise = torch.randn(size, device=device)
-            noise = noise * node_mask
-            noise = self.remove_mean_with_mask(noise, node_mask)
-            return noise
+            assert len(size) == 3
+            x = torch.randn(size, device=device)
+
+            x_masked = x * node_mask
+
+            # This projection only works because Gaussian is rotation invariant around
+            # zero and samples are independent!
+            x_projected = self.remove_mean_with_mask(x_masked, node_mask)
+            return x_projected
 
         def sample_gaussian_with_mask(size, device, node_mask):
-            noise = torch.randn(size, device=device)
-            noise = noise * node_mask
-            noise = self.remove_mean_with_mask(noise, node_mask)
-            return noise
+            x = torch.randn(size, device=device)
+            x_masked = x * node_mask
+            return x_masked
 
-        return sample_gaussian_with_mask(x.shape, x.device, node_mask)
+
+        z_x = sample_center_gravity_zero_gaussian_with_mask(
+            size=(x.shape[0], x.shape[1], self.diffusion.n_dims), device=node_mask.device,
+            node_mask=node_mask)
+        z_h = sample_gaussian_with_mask(
+            size=(x.shape[0], x.shape[1], self.diffusion.in_node_nf), device=node_mask.device,
+            node_mask=node_mask)
+        z = torch.cat([z_x, z_h], dim=2)
+
+        zs = z * sigma + x
+        return torch.cat([
+            self.remove_mean_with_mask(zs[:, :, :self.diffusion.n_dims],node_mask),
+            zs[:, :, self.diffusion.n_dims:]], dim=2
+        )
 
     @torch.no_grad()
     def sample(self, sample_size: int, guidance: BaseGuidance):
-        # Generate molecules using the generator
-        samples = self.generator.sample(sample_size)
-        return samples
+
+        tot_samples = []
+        n_batchs = math.ceil(sample_size / self.per_sample_batch_size)
+
+        for _ in range(n_batchs):
+
+            nodesxsample = self.nodes_dist.sample(self.per_sample_batch_size)
+            context = self.prop_dist.sample_batch(nodesxsample).to(self.device)
+
+            max_n_nodes = self.dataset_info['max_n_nodes']  # this is the maximum node_size in QM9
+
+            assert int(torch.max(nodesxsample)) <= max_n_nodes
+            batch_size = len(nodesxsample)
+
+            node_mask = torch.zeros(batch_size, max_n_nodes)
+            for i in range(batch_size):
+                node_mask[i, 0:nodesxsample[i]] = 1
+
+            # Compute edge_mask
+
+            edge_mask = node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
+            diag_mask = ~torch.eye(edge_mask.size(1), dtype=torch.bool).unsqueeze(0)
+            edge_mask *= diag_mask
+            edge_mask = edge_mask.view(batch_size * max_n_nodes * max_n_nodes, 1).to(self.device)
+            node_mask = node_mask.unsqueeze(2).to(self.device)
+
+            # # TODO FIX: This conditioning just zeros.
+            # if context is None:
+            #     context = self.prop_dist.sample_batch(nodesxsample)
+            context = context.unsqueeze(1).repeat(1, max_n_nodes, 1).to(self.device) * node_mask
+
+            n_samples = batch_size
+            n_nodes = max_n_nodes
+
+            z = self.diffusion.sample_combined_position_feature_noise(n_samples, n_nodes, node_mask)
+            noise_pred_func = functools.partial(self.diffusion.forward, node_mask=node_mask, edge_mask=edge_mask)
+
+            for t in tqdm(range(self.inference_steps), total=self.inference_steps):
+                
+                z = guidance.guide_step(
+                    z, t, noise_pred_func,
+                    self.ts,
+                    self.alpha_prod_ts, 
+                    self.alpha_prod_t_prevs,
+                    self.eta,
+                    node_mask=node_mask,
+                    edge_mask=edge_mask,
+                    target=context,
+                )
+                # z = z * node_mask
+                x = z[..., :self.diffusion.n_dims]
+                # project x back to the mean zero space, using the mean computed only on the nodes
+                # x = x - x.sum(dim=1, keepdim=True) / node_mask.sum(dim=1, keepdim=True) * node_mask
+                # assert_correctly_masked(x, node_mask)
+                # assert_mean_zero_with_mask(x, node_mask)
+
+                # we may want to log some trajs
+                if self.log_traj:
+                    logger.log_samples(self.tensor_to_obj(z), fname=f'traj/time={t}')
+
+            nan_mask = torch.isnan(z.reshape(z.shape[0], -1)).any(dim=1)
+            logger.log(f"generate {nan_mask.shape[0]} samples, {nan_mask.sum()} of them are NaNs.")
+            if nan_mask.float().mean() >= 0.5:
+                logger.log(f'Warning: {nan_mask.float().mean()} of the samples are NaNs.')
+                raise ValueError('Too many NaNs in the samples. Drop the run')
+            z, node_mask, context = z[~nan_mask], node_mask[~nan_mask], context[~nan_mask]
+            edge_mask = edge_mask.view(-1, max_n_nodes, max_n_nodes, 1)[~nan_mask].view(-1, 1)
+            x, h = self.diffusion.sample_p_xh_given_z0(z, node_mask, edge_mask, context, fix_noise=False)
+
+            # x = x - x.sum(dim=1, keepdim=True) / node_mask.sum(dim=1, keepdim=True) * node_mask
+
+            # assert_correctly_masked(x, node_mask)
+            # assert_mean_zero_with_mask(x, node_mask)
+
+            one_hot = h['categorical']
+            charges = h['integer']
+
+            # assert_correctly_masked(one_hot.float(), node_mask)
+            # if self.args_gen.include_charges:
+            #     assert_correctly_masked(charges.float(), node_mask)
+
+            context = context[:, 0]  # [B, 1]
+            context = context * self.prop_dist.normalizer[self.target]['mad'] + self.prop_dist.normalizer[self.target]['mean']
+
+            tot_samples.append((one_hot, charges, x, node_mask, context))
+        
+        return [torch.cat([tot_samples[batch_id][_] for batch_id in range(len(tot_samples))], dim=0)
+                for _ in range(len(tot_samples[0]))]
 
     @staticmethod
     def tensor_to_obj(x: Union[torch.Tensor, List[torch.Tensor]]):
-        # Convert tensor to molecule objects
-        if isinstance(x, torch.Tensor):
-            x = x.detach().cpu()
-        return x
+        """
+            Given a tensor represneting a batch of molecules, convert it to a list of molecule objects
+        """
+        one_hot, charges, x, node_mask, target = x  # [B, N, 5], [B, N, 0], [B, N, 3], [B, N], [B, 1]
+        one_hot = one_hot.detach().cpu().numpy()
+        charges = charges.detach().cpu().numpy()
+        x = x.detach().cpu().numpy()
+        node_mask = node_mask.detach().cpu().numpy()
+        target = target.detach().cpu().numpy()
+        # list of (one_hot, charges, x, node_mask), for each molecule
+        return [(one_hot[_], charges[_], x[_], node_mask[_], target[_]) for _ in range(one_hot.shape[0])]
 
     @staticmethod
     def obj_to_tensor(objs: List[Any]) -> Union[torch.Tensor, List[torch.Tensor]]:
-        # Convert molecule objects to tensor
-        if isinstance(objs, list):
-            return [torch.tensor(obj) if not isinstance(obj, torch.Tensor) else obj for obj in objs]
-        else:
-            return torch.tensor(objs) if not isinstance(objs, torch.Tensor) else objs
+        """
+            convert a list of molecule objects into torch tensors that are used for sampling
+        """
+        batched_one_hot = np.stack([objs[_][0] for _ in range(len(objs))], axis=0)
+        batched_one_hot = torch.from_numpy(batched_one_hot)
+        batched_charges = np.stack([objs[_][1] for _ in range(len(objs))], axis=0)
+        batched_charges = torch.from_numpy(batched_charges)
+        batched_x = np.stack([objs[_][2] for _ in range(len(objs))], axis=0)
+        batched_x = torch.from_numpy(batched_x)
+        batched_node_mask = np.stack([objs[_][3] for _ in range(len(objs))], axis=0)
+        batched_node_mask = torch.from_numpy(batched_node_mask)
+        batched_target = np.stack([objs[_][4] for _ in range(len(objs))], axis=0)
+        batched_target = torch.from_numpy(batched_target)
+
+        return [batched_one_hot, batched_charges, batched_x, batched_node_mask, batched_target]
