@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+
+import os
+import argparse
+import numpy as np
+import torch
+from PIL import Image
+import torchvision.transforms as transforms
+from tasks.networks.resnet import ResNet18
+from utils.configs import Arguments
+from logger import setup_logger
+
+def load_images_from_deepcache_experiment(exp_dir):
+    """Load images from a DeepCache experiment directory"""
+    all_images = []
+    
+    # images.npy 파일 찾기
+    images_file = None
+    for root, dirs, files in os.walk(exp_dir):
+        if "images.npy" in files:
+            images_file = os.path.join(root, "images.npy")
+            break
+    
+    if not images_file:
+        print(f"Images file not found in: {exp_dir}")
+        return []
+    
+    print(f"Loading images from: {images_file}")
+    try:
+        # Load numpy array
+        img_array = np.load(images_file)
+        print(f"Loaded array shape: {img_array.shape}")
+        
+        # img_array는 (num_samples, height, width, channels) 형태
+        for i in range(img_array.shape[0]):
+            img = Image.fromarray(img_array[i].astype(np.uint8))
+            all_images.append(img)
+        
+        print(f"Loaded {img_array.shape[0]} images from {exp_dir}")
+        
+    except Exception as e:
+        print(f"Error loading {images_file}: {e}")
+        return []
+    
+    return all_images
+
+def calculate_condition_accuracy_for_deepcache_experiment(exp_dir, target_class=6):
+    """Calculate condition accuracy for a specific DeepCache experiment"""
+    try:
+        # Load generated images
+        generated_images = load_images_from_deepcache_experiment(exp_dir)
+        if not generated_images:
+            print(f"No images found for experiment: {exp_dir}")
+            return None
+        
+        # Setup configuration
+        config_args = Arguments()
+        config_args.targets = [str(target_class)]
+        config_args.tasks = ['classifier']
+        config_args.eval_batch_size = 32
+        config_args.image_size = 32
+        config_args.classifiers_path = "tasks/classifiers"
+        config_args.args_classifiers_path = "tasks/classifiers"
+        config_args.logging_dir = "logs"
+        config_args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Setup logger
+        setup_logger(config_args)
+        
+        # ResNet18 classifier 로드 - target_class에 맞는 guide_network 사용
+        classifier = ResNet18(targets=target_class, guide_network='resnet_cifar10.pt')
+        classifier = classifier.to(config_args.device)
+        classifier.eval()
+        
+        # Convert images to tensors
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
+        
+        image_tensors = []
+        for img in generated_images:
+            tensor = transform(img)
+            image_tensors.append(tensor)
+        
+        # Stack tensors
+        batch = torch.stack(image_tensors).to(config_args.device)
+        
+        # Calculate accuracy
+        with torch.no_grad():
+            outputs = classifier(batch)  # target class에 대한 log probability 반환
+            probabilities = torch.exp(outputs)  # log probability를 probability로 변환
+            accuracy = probabilities.mean().item()
+        
+        print(f"Condition accuracy: {accuracy:.4f}")
+        return accuracy
+        
+    except Exception as e:
+        print(f"Error calculating condition accuracy for {exp_dir}: {e}")
+        return None
+
+def process_deepcache_layer_experiments(experiment_base_dir):
+    """Process DeepCache layer experiments"""
+    print(f"=== Processing DeepCache layer experiments from: {experiment_base_dir} ===")
+    
+    if not os.path.exists(experiment_base_dir):
+        print(f"Experiment base directory not found: {experiment_base_dir}")
+        return []
+    
+    results = []
+    
+    # 각 실험 서브디렉토리 찾기 (cache_interval_X_layer_depth_Y 형태)
+    for item in os.listdir(experiment_base_dir):
+        if item.startswith("cache_interval_") and os.path.isdir(os.path.join(experiment_base_dir, item)):
+            cache_layer_dir = os.path.join(experiment_base_dir, item)
+            
+            # cache_interval_X_layer_depth_Y에서 X와 Y 추출
+            try:
+                parts = item.split("_")
+                cache_interval = int(parts[2])
+                layer_depth = int(parts[5])  # layer_depth는 5번째 인덱스
+                
+                print(f"\nProcessing: cache_interval={cache_interval}, layer_depth={layer_depth}")
+                accuracy = calculate_condition_accuracy_for_deepcache_experiment(cache_layer_dir)
+                
+                results.append({
+                    'experiment_dir': os.path.basename(experiment_base_dir),
+                    'cache_interval': cache_interval,
+                    'layer_depth': layer_depth,
+                    'condition_accuracy': accuracy
+                })
+                
+            except (ValueError, IndexError) as e:
+                print(f"Error parsing directory name {item}: {e}")
+                continue
+    
+    return results
+
+def save_results_to_csv(results, filename):
+    """Save results to CSV file"""
+    if not results:
+        print("No results to save")
+        return
+    
+    headers = ['experiment_dir', 'cache_interval', 'layer_depth', 'condition_accuracy']
+    
+    with open(filename, 'w') as f:
+        # Write header
+        f.write(','.join(headers) + '\n')
+        
+        # Write data
+        for result in results:
+            if result['condition_accuracy'] is not None:
+                f.write(f"{result['experiment_dir']},{result['cache_interval']},{result['layer_depth']},{result['condition_accuracy']:.4f}\n")
+    
+    print(f"Results saved to: {filename}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Calculate condition accuracy for DeepCache layer experiments')
+    parser.add_argument('--experiment_dir', type=str, required=True, 
+                       help='DeepCache layer experiment directory')
+    parser.add_argument('--target_class', type=int, default=2,
+                       help='Target class for condition accuracy calculation (default: 2)')
+    parser.add_argument('--output_file', type=str, required=True,
+                       help='Output CSV file name')
+    
+    args = parser.parse_args()
+    
+    # DeepCache layer 실험 처리
+    results = process_deepcache_layer_experiments(args.experiment_dir)
+    
+    if results:
+        # CSV 파일로 저장
+        save_results_to_csv(results, args.output_file)
+        
+        # 결과 요약
+        print(f"\n=== Summary ===")
+        print(f"Total experiments processed: {len(results)}")
+        valid_results = [r for r in results if r['condition_accuracy'] is not None]
+        print(f"Valid results: {len(valid_results)}")
+        
+        if valid_results:
+            accuracies = [r['condition_accuracy'] for r in valid_results]
+            print(f"Average condition accuracy: {np.mean(accuracies):.4f}")
+            print(f"Min condition accuracy: {np.min(accuracies):.4f}")
+            print(f"Max condition accuracy: {np.max(accuracies):.4f}")
+            
+            # Layer depth별 평균
+            layer_depths = set(r['layer_depth'] for r in valid_results)
+            print(f"\n=== Layer Depth별 평균 ===")
+            for layer_depth in sorted(layer_depths):
+                depth_results = [r for r in valid_results if r['layer_depth'] == layer_depth]
+                depth_accuracies = [r['condition_accuracy'] for r in depth_results]
+                print(f"Layer Depth {layer_depth}: {np.mean(depth_accuracies):.4f} (n={len(depth_results)})")
+            
+            # Cache interval별 평균
+            cache_intervals = set(r['cache_interval'] for r in valid_results)
+            print(f"\n=== Cache Interval별 평균 ===")
+            for cache_interval in sorted(cache_intervals):
+                interval_results = [r for r in valid_results if r['cache_interval'] == cache_interval]
+                interval_accuracies = [r['condition_accuracy'] for r in interval_results]
+                print(f"Cache Interval {cache_interval}: {np.mean(interval_accuracies):.4f} (n={len(interval_results)})")
+    else:
+        print("No results found")
+
+if __name__ == "__main__":
+    main() 

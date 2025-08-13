@@ -19,6 +19,7 @@ from methods.base import BaseGuidance
 from methods.ugd import UGDGuidance
 from methods.freedom import FreedomGuidance
 from methods.dps import DPSGuidance
+from methods.deepcache_dps import DeepCacheDPSGuidance
 from methods.tfg import TFGGuidance
 from methods.cg import ClassifierGuidance
 
@@ -111,7 +112,11 @@ def get_guidance(args, network):
     elif args.guidance_name == 'freedom':
         return FreedomGuidance(args, noise_fn=noise_fn)
     elif args.guidance_name == 'dps':
-        return DPSGuidance(args, diffusion=diffusion, noise_fn=noise_fn)
+        # DeepCache 사용 여부 확인
+        if getattr(args, 'use_deepcache', False):
+            return DeepCacheDPSGuidance(args, diffusion=diffusion, noise_fn=noise_fn)
+        else:
+            return DPSGuidance(args, diffusion=diffusion, noise_fn=noise_fn)
     elif 'lgd' in args.guidance_name:
         return LGDGuidance(args, noise_fn=noise_fn)
     elif "tfg" in args.guidance_name:

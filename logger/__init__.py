@@ -10,9 +10,17 @@ from .audio_logger import AudioLogger
 # placeholder that will be replaced by the actual logger via setup_logger called by get_config()
 logger = None
 
-def log_samples(*args, **kwargs):
+def log_samples(*args, output_dir=None, **kwargs):
     assert logger is not None, "Logger is not initialized"
-    logger.log_samples(*args, **kwargs)
+    if output_dir is not None:
+        # output_dir이 지정된 경우 해당 디렉토리에 저장
+        original_logging_dir = logger.args.logging_dir
+        logger.args.logging_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        logger.log_samples(*args, **kwargs)
+        logger.args.logging_dir = original_logging_dir
+    else:
+        logger.log_samples(*args, **kwargs)
 
 def load_samples(*args, **kwargs):
     assert logger is not None, "Logger is not initialized"

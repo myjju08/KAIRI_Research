@@ -510,319 +510,36 @@ class DPSGuidance(BaseGuidance):
 
     def guide_step(
         self,
-        x: th.Tensor,
-        t: th.Tensor,
-        model: th.nn.Module,
-        ts: th.LongTensor = None,
-        alpha_prod_ts: th.Tensor = None,
-        alpha_prod_t_prevs: th.Tensor = None,
-        eta: float = 0.0,
-        class_labels=None,
-        cfg_scale=4.0,
-        diffusion=None,
-        model_type=None,
-        model_name_or_path=None,
-        image_size=None,
-        guidance_scale=None,
-        start_gradient=None,
+        x: torch.Tensor,
+        t: int,
+        unet: torch.nn.Module,
+        ts: torch.LongTensor,
+        alpha_prod_ts: torch.Tensor,
+        alpha_prod_t_prevs: torch.Tensor,
+        eta: float,
         **kwargs,
-    ) -> th.Tensor:
-        if model_type == 'uvit':
-            # UViT SDE 기반 DPS 구현
-            from sde import VPSDE, ScoreModel, ReverseSDE
-            from libs.uvit import UViT
-            
-            # UViT 모델 로드 (캐싱 가능)
-            if not hasattr(self, '_uvit_model') or self._uvit_model is None:
-                # UViT 모델 생성 (early exit 속성과 관계없이 동일하게)
-                self._uvit_model = UViT(
-                    img_size=32,
-                    patch_size=2,
-                    in_chans=3,
-                    embed_dim=512,
-                    depth=12,
-                    num_heads=8,
-                    mlp_ratio=4,
-                    qkv_bias=False,
-                    mlp_time_embed=False,
-                    num_classes=-1,
-                    norm_layer=torch.nn.LayerNorm,
-                    use_checkpoint=False,
-                    early_exit=self.use_early_exit if hasattr(self, 'use_early_exit') else False,
-                    early_exit_layer=self.early_exit_layer if hasattr(self, 'early_exit_layer') else None,
-                    use_time_based_early_exit=self.use_time_based_early_exit if hasattr(self, 'use_time_based_early_exit') else False,
-                    time_early_exit_mapping=self.time_early_exit_mapping if hasattr(self, 'time_early_exit_mapping') else None
-                ).to(x.device)
-                
-                # 모델 가중치 로드
-                state_dict = torch.load(model_name_or_path, map_location=x.device)
-                self._uvit_model.load_state_dict(state_dict)
-                self._uvit_model.eval()
-            
-            # SDE 설정
-            sde_obj = VPSDE(beta_min=0.1, beta_max=20)
-            
-            # score_model 설정 (하나의 모델 사용)
-            score_model = ScoreModel(self._uvit_model, pred='noise_pred', sde=sde_obj)
-            
-            rsde = ReverseSDE(score_model)
-            
-            # SDE timesteps 설정
-            sample_steps = kwargs.get('sample_steps', 50)
-            eps = 1e-3
-            T = 1
-            timesteps = np.linspace(eps, T, sample_steps+1)
-            timesteps = torch.tensor(timesteps).to(x)
-            
-            # 현재 timestep 계산
-            t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
-            s = timesteps[t_idx]
-            t_val = timesteps[t_idx+1] if t_idx+1 < len(timesteps) else 0.0
-            
-            if t_val >= 1.0:
-                print(f"[WARNING] t_val={t_val:.4f} >= 1.0, skipping step")
-                return x
-            
-            target_class = class_labels[0].item() if class_labels is not None else int(self.args.target)
-            
-            # start_gradient 체크: 해당 step 이후에만 gradient 적용
-            if start_gradient is not None and t_idx >= start_gradient:
-                print(f"[INFO] Step {t_idx} < start_gradient ({start_gradient}), skipping gradient guidance")
-                # Unconditional prediction만 수행
-                with torch.no_grad():
-                    drift = rsde.drift(x, t_val)
-                    diffusion = rsde.diffusion(t_val)
-                    dt = s - t_val
-                    mean = x + drift * dt
-                    sigma = diffusion * (-dt).sqrt()
-                    x_next = mean + sigma * torch.randn_like(x)
-                    return x_next
-            
-            # DPS: x_t -> x_0 -> classifier -> gradient
-            x_with_grad = x.detach().clone().requires_grad_(True)
-            
-            # Early exit 여부에 따라 x0_pred 계산
-            if hasattr(self, 'use_early_exit') and self.use_early_exit:
-                # Early exit 사용 (gradient 계산용)
-                x0_pred = score_model.x0_pred(x_with_grad, t_val, use_early_exit=True)
-                print(f"[DEBUG] Using early exit for gradient computation (early_exit_layer={self.early_exit_layer})")
-            else:
-                # Full transformer 사용
-                x0_pred = score_model.x0_pred(x_with_grad, t_val, use_early_exit=False)
-                print(f"[DEBUG] Using full transformer for gradient computation")
-            
-            # NaN/Inf 체크
-            if torch.isnan(x0_pred).any() or torch.isinf(x0_pred).any():
-                print(f'[ERROR] x0_pred contains NaN/Inf! min={x0_pred.min().item()}, max={x0_pred.max().item()}')
-                grad_xt = torch.zeros_like(x)
-            else:
-                # Classifier gradient 계산
-                grad_xt = self._compute_gradient_wrt_x0_uvit(x_with_grad, target_class, t_val, score_model=score_model)
-                if grad_xt is None or torch.isnan(grad_xt).any() or torch.isinf(grad_xt).any():
-                    print(f"[WARNING] grad_xt contains NaN/Inf, using zero gradient")
-                    grad_xt = torch.zeros_like(x)
-            
-            # guidance_scale이 None이면 기본값 사용
-            if guidance_scale is None:
-                guidance_scale = 1.0
-            
-            # Classifier 확률값 디버깅
-            with torch.no_grad():
-                # x0_pred를 이미지 형태로 변환
-                x0_img = x0_pred.clamp(-1, 1)
-                x0_img = (x0_img + 1) / 2  # [-1,1] -> [0,1]
-                x0_img = x0_img.clamp(0, 1)
-                
-                # CIFAR-10 정규화 적용
-                import torchvision.transforms as T
-                normalize = T.Normalize((0.4914, 0.4822, 0.4465), (0.2471, 0.2435, 0.2616))
-                x0_img_norm = torch.stack([normalize(img) for img in x0_img])
-                
-                # Classifier 찾기
-                classifier = None
-                if hasattr(self, 'guider') and hasattr(self.guider, 'get_guidance'):
-                    get_guidance = self.guider.get_guidance
-                    if hasattr(get_guidance, 'func') and hasattr(get_guidance.func, '__self__'):
-                        guider_obj = get_guidance.func.__self__
-                        if hasattr(guider_obj, 'classifier'):
-                            classifier = guider_obj.classifier
-                
-                if classifier is not None:
-                    with torch.no_grad():
-                        if hasattr(classifier, '_forward'):
-                            all_logits = classifier._forward(x0_img_norm)
-                            all_probs = torch.softmax(all_logits, dim=1)
-                            
-                            # 타겟 클래스 (개구리=6) 확률
-                            target_probs = all_probs[:, target_class]
-                            
-                            # 전체 클래스 확률 분포
-                            class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
-                            target_class_name = class_names[target_class] if target_class < len(class_names) else f'class_{target_class}'
-                            
-                            print(f"[DEBUG] Classifier Results (t={t_val:.4f}):")
-                            print(f"  Target class ({target_class_name}): prob={target_probs.mean().item():.4f} (min={target_probs.min().item():.4f}, max={target_probs.max().item():.4f})")
-                            
-                            frog_probs = all_probs[:, target_class]  
-                            print(f"  All samples probs: {[f'{prob:.4f}' for prob in frog_probs.cpu().numpy()]}")
-                            
-                            # Top-3 클래스 확률
-                            top3_probs, top3_indices = torch.topk(all_probs.mean(dim=0), 3)
-                            print(f"  Top-3 classes: {[f'{class_names[idx]}({prob:.4f})' for idx, prob in zip(top3_indices.cpu().numpy(), top3_probs.cpu().numpy())]}")
-                            
-                            # 첫 번째 샘플의 상세 확률
-                            if x0_img.shape[0] > 0:
-                                first_sample_probs = all_probs[0]
-                                print(f"  First sample probs: {[f'{name}:{prob:.4f}' for name, prob in zip(class_names, first_sample_probs.cpu().numpy())]}")
-                        else:
-                            classifier_output = classifier(x0_img_norm)
-                            print(f"[DEBUG] Raw classifier output shape: {classifier_output.shape}")
-                else:
-                    print(f"[DEBUG] Classifier not found")
-            
-            # SDE step 계산용 rsde (항상 full transformer 사용)
-            sde_rsde = ReverseSDE(score_model)
-            
-            # SDE step 계산 (항상 full transformer 사용)
-            with torch.no_grad():
-                print(f"[DEBUG] SDE step: using full transformer (guidance_scale={guidance_scale})")
-                drift = sde_rsde.drift(x, t_val, use_early_exit=False)  # full transformer 강제
-                diffusion = sde_rsde.diffusion(t_val)
-                dt = s - t_val
-                mean = x + drift * dt
-                sigma = diffusion * (-dt).sqrt()
-                
-                # DPS guidance 적용
-                x_next = mean + sigma * torch.randn_like(x) + guidance_scale * (sigma**2) * grad_xt
-                
-                if torch.isnan(x_next).any() or torch.isinf(x_next).any():
-                    print(f"[ERROR] x_next contains NaN/Inf, using mean only")
-                    x_next = mean
-                
-                print(f"[DEBUG] guidance_scale: {guidance_scale}, mean norm: {mean.norm():.4f}, x_next norm: {x_next.norm():.4f}")
-                
-                return x_next
-
-        elif model_type in ['transformer']:
-            # 기존 DiT step 함수 (기존 코드)
-            # 타겟 클래스 사용 (class_labels가 None이면 args.target 사용)
-            if class_labels is not None:
-                target_class = class_labels[0].item() if len(class_labels) > 0 else int(self.args.target)
-            else:
-                target_class = int(self.args.target)
-            
-            # 1. Predict x0 from current x_t using the diffusion model
-            out = self.diffusion_obj.p_sample(
-                model.forward_with_cfg, 
-                x.float(), 
-                t, 
-                clip_denoised=False, 
-                model_kwargs=dict(y=th.tensor([1000], device=x.device, dtype=th.long), cfg_scale=cfg_scale)
-            )
-            pred_xstart = out["pred_xstart"]
-            
-            # 2. Decode to image space for guidance
-            z0_decoded = self.vae.decode(pred_xstart / 0.18215, return_dict=False)[0]
-            
-            # 3. Compute gradient w.r.t. z_t (current latent)
-            grad_z_t = self._compute_gradient_wrt_z_t(
-                x, pred_xstart, z0_decoded, target_class, t, **kwargs
-            )
-            
-            # 4. Apply DPS update rule according to the paper
-            eps = self.diffusion_obj._predict_eps_from_xstart(x, t, pred_xstart)
-            
-            # Get diffusion parameters
-            alpha_t = alpha_prod_ts[t]
-            alpha_prev = alpha_prod_t_prevs[t]
-            
-            # DPS 논문의 정확한 수식 구현
-            # x_{t-1} = μ(x_t, t) + Σ(x_t, t) * ∇_{x_t} log p(y|x_0)
-            
-            # Standard DDIM mean prediction
-            sqrt_1m_alpha_t = (1 - alpha_t).sqrt().view(-1, 1, 1, 1)
-            sqrt_alpha_prev_alpha_t = (alpha_prev / alpha_t).sqrt().view(-1, 1, 1, 1)
-            sqrt_1m_alpha_prev_sigma2 = (1 - alpha_prev).sqrt().view(-1, 1, 1, 1)
-            
-            # DDIM step without noise
-            x_prev_mean = (
-                sqrt_alpha_prev_alpha_t * (x - sqrt_1m_alpha_t * eps)
-                + sqrt_1m_alpha_prev_sigma2 * eps
-            )
-            
-            # DPS guidance term: posterior variance * gradient
-            # DPS 논문에서 posterior variance는 β_t * (1 - α_{t-1}) / (1 - α_t)
-            try:
-                # DDIM에서 posterior variance는 0이므로, 대신 guidance scale을 사용
-                # posterior_var = self.diffusion_obj.posterior_variance[t]
-                
-                # 대신 DPS 논문에서 제안하는 방법 사용
-                # posterior variance 대신 guidance scale 사용
-                guidance_scale = 0.3
-                
-                # Gradient normalization for numerical stability
-                grad_norm = grad_z_t.flatten(1).norm(p=2, dim=1).view(-1, 1, 1, 1)
-                normalized_grad = grad_z_t / (grad_norm + 1e-8)
-                
-                # Apply DPS guidance: x_{t-1} = μ + guidance_scale * normalized_grad
-                x_prev = x_prev_mean + guidance_scale * normalized_grad
-                
-            except Exception as e:
-                print(f"DPS guidance computation failed: {e}")
-                # Fallback: no guidance
-                x_prev = x_prev_mean
-            
-            # Add noise if eta > 0 (for stochastic sampling)
-            if eta > 0:
-                # Create nonzero_mask exactly like DiT
-                nonzero_mask = (
-                    (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
-                )  # no noise when t == 0
-                
-                # Generate noise and add it
-                noise = th.randn_like(x)
-                sigma = eta * (
-                    (1 - alpha_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_prev)
-                ) ** (0.5)
-                x_prev = x_prev + nonzero_mask * sigma.view(-1, 1, 1, 1) * noise * 0
-            
-            out["sample"] = x_prev.float()
-            return out
+    ) -> torch.Tensor:
         
-        elif model_type in ['unet', 'transformer'] or model_type is None:
-            # UNet/Transformer/기본 모델 처리
-            # alpha_prod_ts, alpha_prod_t_prevs가 None인 경우 diffusion 스케줄에서 계산
-            if alpha_prod_ts is None or alpha_prod_t_prevs is None:
-                if hasattr(self, 'alphas_cumprod'):
-                    # diffusion 스케줄에서 직접 계산
-                    t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
-                    alpha_prod_t = torch.tensor(self.alphas_cumprod[t_idx], device=x.device, dtype=x.dtype)
-                    alpha_prod_t_prev = torch.tensor(self.alphas_cumprod_prev[t_idx], device=x.device, dtype=x.dtype)
-                else:
-                    # 기본값 사용 (DDPM 스케줄)
-                    print("[WARNING] No diffusion schedule found, using default values")
-                    alpha_prod_t = torch.tensor(0.9, device=x.device, dtype=x.dtype)
-                    alpha_prod_t_prev = torch.tensor(0.8, device=x.device, dtype=x.dtype)
-            else:
-                alpha_prod_t = alpha_prod_ts[t]
-                alpha_prod_t_prev = alpha_prod_t_prevs[t]
-            
-            t = ts[t] if ts is not None else t
+        alpha_prod_t = alpha_prod_ts[t]
+        alpha_prod_t_prev = alpha_prod_t_prevs[t]
+        t = ts[t]
 
-            epsilon = model(x, t)
-            x_prev = self._predict_x_prev_from_eps(x, epsilon, alpha_prod_t, alpha_prod_t_prev, eta, t, **kwargs)
+        # DeepCache 모델 호출
+        epsilon = unet(x, t)
+        x_prev = self._predict_x_prev_from_eps(x, epsilon, alpha_prod_t, alpha_prod_t_prev, eta, t, **kwargs)
 
-            # model을 unet으로 사용 (변수명 수정)
-            func = lambda zt: (zt - (1 - alpha_prod_t) ** (0.5) * model(zt, t)) / (alpha_prod_t ** (0.5))
+        func = lambda zt: (zt - (1 - alpha_prod_t) ** (0.5) * unet(zt, t)) / (alpha_prod_t ** (0.5))
 
-            guidance = self.guider.get_guidance(x.clone().detach().requires_grad_(), func, **kwargs)
-            
-            # follow the schedule of DPS paper
-            logp_norm = self.guider.get_guidance(x.clone().detach(), func, return_logp=True, check_grad=False, **kwargs)
-            
-            x_prev = x_prev + self.args.guidance_strength * guidance / torch.abs(logp_norm.view(-1, * ([1] * (len(x_prev.shape) - 1)) ))
+        guidance = self.guider.get_guidance(x.clone().detach().requires_grad_(), func, **kwargs)
+        
+        # follow the schedule of DPS paper
+        logp_norm = self.guider.get_guidance(x.clone().detach(), func, return_logp=True, check_grad=False, **kwargs)
+        
+        x_prev = x_prev + self.args.guidance_strength * guidance / torch.abs(logp_norm.view(-1, * ([1] * (len(x_prev.shape) - 1)) ))
 
-            return x_prev
+        return x_prev
+
+
 
     def _compute_gradient_wrt_z_t(
         self, 

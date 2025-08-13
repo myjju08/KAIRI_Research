@@ -25,12 +25,12 @@ mu=0.25
 sigma=0.001
 eps_bsz=1
 iter_steps=4
-guidance_scale=0.0
+guidance_scale=2.0
 
 # Early exit 설정
 
 use_early_exit=True
-early_exit_layer=6  # decode layer의 6번째 layer에서 early exit (총 6개 decode layer 중 6번째)
+early_exit_layer=5  # decode layer의 6번째 layer에서 early exit (총 6개 decode layer 중 6번째)
 
 # 실행 시간 측정 시작
 start_time=$(date +%s.%N)

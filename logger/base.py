@@ -114,6 +114,7 @@ class BaseLogger:
     def __init__(self, args, output_formats):
         self.level = INFO
         self.output_formats = output_formats
+        self.args = args  # args 저장
         self.logging_dir = args.logging_dir
         self.wandb = args.wandb
         if args.wandb:

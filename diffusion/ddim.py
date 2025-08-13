@@ -680,7 +680,18 @@ class ImageSampler(BaseSampler):
                     if self.log_traj:
                         logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')
 
+            # None 체크 추가
+            if x is None:
+                print(f"[ERROR] guide_step returned None for batch {batch_id}")
+                raise ValueError(f"guide_step returned None for batch {batch_id}")
+            
             tot_samples.append(x)
+        
+        # tot_samples에 None이 있는지 확인
+        for i, sample in enumerate(tot_samples):
+            if sample is None:
+                print(f"[ERROR] tot_samples[{i}] is None")
+                raise ValueError(f"tot_samples[{i}] is None")
         
         return torch.concat(tot_samples)
 
