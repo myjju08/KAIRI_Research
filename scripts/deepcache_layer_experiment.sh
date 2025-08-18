@@ -18,7 +18,7 @@ echo "시작 시간: $(date)"
 start_time=$(date +%s)
 
 # 기본 설정
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=1
 data_type=image
 task=label_guidance
 image_size=32
@@ -52,9 +52,8 @@ skip_mode='uniform'
 clean_step=0
 
 # Layer Depth 및 Cache Interval 실험 설정
-# CIFAR10 UNet: Input blocks 0-15, Output blocks 0-15
-cache_block_ids=(4 5 6 7 8 9 10 11 12 13 14 15)
-cache_intervals=(3)
+cache_block_ids=(1)
+cache_intervals=(4)
 
 # 실험 결과 저장 디렉토리 (프로젝트 루트에 저장)
 experiment_dir="$PROJECT_ROOT/deepcache_layer_experiments_target=${target}_$(date +%Y%m%d_%H%M%S)"
@@ -69,6 +68,11 @@ echo "=== Layer Depth 및 Cache Interval 조합별 실험 (순차 실행) ==="
 
 total_experiments=$(( ${#cache_block_ids[@]} * ${#cache_intervals[@]} ))
 current_experiment=0
+
+# 실험 시간 측정을 위한 배열 초기화
+declare -a experiment_times
+declare -a experiment_cache_intervals
+declare -a experiment_layer_depths
 
 # 실험 시작 시간 기록
 experiment_start_time=$(date +%s)
@@ -132,6 +136,11 @@ for cache_interval in "${cache_intervals[@]}"; do
     experiment_end_time=$(date +%s)
     experiment_duration=$((experiment_end_time - experiment_start_time))
     
+    # 실험 시간 정보 저장
+    experiment_times+=($experiment_duration)
+    experiment_cache_intervals+=($cache_interval)
+    experiment_layer_depths+=($cache_block_id)
+    
     echo ""
     echo "=== 실험 $current_experiment 완료 ==="
     echo "완료 시간: $(date)"
@@ -152,6 +161,85 @@ echo "=== 모든 실험이 완료되었습니다 ==="
 echo "실험 디렉토리: $experiment_dir"
 echo "로그 디렉토리: $LOG_DIR"
 
+# 실험 시간 결과를 CSV 파일로 저장
+echo "=== 실험 시간 결과 저장 ==="
+timing_csv_file="${experiment_dir}/experiment_timing_results.csv"
+
+# CSV 헤더 작성
+echo "cache_interval,layer_depth,time_seconds,time_minutes" > "$timing_csv_file"
+
+# 각 실험의 시간 정보를 CSV에 추가
+for i in "${!experiment_times[@]}"; do
+    cache_interval="${experiment_cache_intervals[$i]}"
+    layer_depth="${experiment_layer_depths[$i]}"
+    time_seconds="${experiment_times[$i]}"
+    time_minutes=$(echo "scale=2; $time_seconds / 60" | bc -l)
+    
+    echo "$cache_interval,$layer_depth,$time_seconds,$time_minutes" >> "$timing_csv_file"
+done
+
+echo "실험 시간 결과가 $timing_csv_file에 저장되었습니다."
+
+# 시간 결과 요약 출력
+echo ""
+echo "=== 실험 시간 요약 ==="
+echo "총 실험 수: ${#experiment_times[@]}"
+echo "평균 시간: $(echo "scale=2; $(IFS=+; echo "$((${experiment_times[*]}))") / ${#experiment_times[@]}" | bc -l)초"
+echo "최소 시간: $(printf '%s\n' "${experiment_times[@]}" | sort -n | head -1)초"
+echo "최대 시간: $(printf '%s\n' "${experiment_times[@]}" | sort -n | tail -1)초"
+
+# Cache Interval별 평균 시간
+echo ""
+echo "=== Cache Interval별 평균 시간 ==="
+for interval in "${cache_intervals[@]}"; do
+    total_time=0
+    count=0
+    for i in "${!experiment_cache_intervals[@]}"; do
+        if [[ "${experiment_cache_intervals[$i]}" == "$interval" ]]; then
+            total_time=$((total_time + experiment_times[i]))
+            count=$((count + 1))
+        fi
+    done
+    if [[ $count -gt 0 ]]; then
+        avg_time=$(echo "scale=2; $total_time / $count" | bc -l)
+        echo "Cache Interval $interval: ${avg_time}초 (n=$count)"
+    fi
+done
+
+# Layer Depth별 평균 시간 (상위 5개)
+echo ""
+echo "=== Layer Depth별 평균 시간 (상위 5개) ==="
+declare -A depth_times
+declare -A depth_counts
+
+for i in "${!experiment_layer_depths[@]}"; do
+    depth="${experiment_layer_depths[$i]}"
+    time="${experiment_times[$i]}"
+    
+    if [[ -z "${depth_times[$depth]}" ]]; then
+        depth_times[$depth]=0
+        depth_counts[$depth]=0
+    fi
+    
+    depth_times[$depth]=$((depth_times[$depth] + time))
+    depth_counts[$depth]=$((depth_counts[$depth] + 1))
+done
+
+# 평균 시간 계산 및 정렬
+for depth in "${!depth_times[@]}"; do
+    if [[ ${depth_counts[$depth]} -gt 0 ]]; then
+        avg_time=$(echo "scale=2; ${depth_times[$depth]} / ${depth_counts[$depth]}" | bc -l)
+        echo "$depth $avg_time" >> /tmp/depth_avg_times.txt
+    fi
+done
+
+if [[ -f /tmp/depth_avg_times.txt ]]; then
+    sort -k2,2n /tmp/depth_avg_times.txt | head -5 | while read depth avg_time; do
+        echo "Layer Depth $depth: ${avg_time}초"
+    done
+    rm /tmp/depth_avg_times.txt
+fi
+
 # 결과 수집 스크립트 생성
 cat > "${experiment_dir}/collect_results.sh" << 'EOF'
 #!/bin/bash
@@ -169,7 +257,7 @@ echo "결과 수집 중..."
 
 # 각 실험 디렉토리에서 결과 수집
 for cache_interval in 3; do
-    for layer_depth in {0..15}; do
+    for layer_depth in {1..15}; do
         experiment_dir="cache_interval_${cache_interval}_layer_depth_${layer_depth}"
         if [ -d "$experiment_dir" ]; then
             # images.npy 파일이 있는지 확인
@@ -203,6 +291,7 @@ echo "결과 확인 방법:"
 echo "1. 완료된 실험 목록: cat results.txt"
 echo "2. CSV 형식 결과: cat results.csv"
 echo "3. 특정 실험 확인: ls -la cache_interval_*/images.npy"
+echo "4. 시간 측정 결과: cat experiment_timing_results.csv"
 EOF
 
 chmod +x "${experiment_dir}/collect_results.sh"
@@ -216,10 +305,10 @@ import seaborn as sns
 import numpy as np
 import os
 
-# 결과 파일 읽기
-results_file = "results.csv"
-if os.path.exists(results_file):
-    df = pd.read_csv(results_file)
+# 시간 측정 결과 파일 읽기
+timing_file = "experiment_timing_results.csv"
+if os.path.exists(timing_file):
+    df = pd.read_csv(timing_file)
     
     # 그래프 설정
     fig = plt.figure(figsize=(16, 12))
@@ -328,7 +417,7 @@ if os.path.exists(results_file):
         print(f"  Cache Interval {interval}: Layer Depth {best_depth} ({best_time:.2f}초)")
         
 else:
-    print("results.csv 파일을 찾을 수 없습니다.")
+    print("experiment_timing_results.csv 파일을 찾을 수 없습니다.")
 EOF
 
 echo ""
@@ -347,6 +436,8 @@ echo "Cache Intervals: ${cache_intervals[*]}" >> "${experiment_dir}/experiment_i
 echo "Layer Depths: ${cache_block_ids[*]}" >> "${experiment_dir}/experiment_info.txt"
 echo "Target: $target" >> "${experiment_dir}/experiment_info.txt"
 echo "실행 방식: 순차 실행" >> "${experiment_dir}/experiment_info.txt"
+echo "시간 측정: 각 실험별 1024개 이미지 생성 시간 측정" >> "${experiment_dir}/experiment_info.txt"
+echo "결과 파일: experiment_timing_results.csv" >> "${experiment_dir}/experiment_info.txt"
 
 echo ""
 echo "실험 정보가 ${experiment_dir}/experiment_info.txt에 저장되었습니다."
@@ -362,4 +453,5 @@ echo ""
 echo "실험 결과 확인:"
 echo "1. 결과 수집: ${experiment_dir}/collect_results.sh"
 echo "2. 그래프 생성: cd ${experiment_dir} && python3 plot_results.py"
-echo "3. 실험 정보: cat ${experiment_dir}/experiment_info.txt" 
+echo "3. 실험 정보: cat ${experiment_dir}/experiment_info.txt"
+echo "4. 시간 측정 결과: cat ${experiment_dir}/experiment_timing_results.csv" 

@@ -31,13 +31,13 @@ iter_steps=4
 start_gradient=25
 
 # start_gradient 값들
-start_gradients=(10 15 20 25 30 35 40 45 50)
+start_gradients=(35)
 
 # guidance_scale 값들
-guidance_scales=(0 0.1 1 2 5 10)
+guidance_scales=(10)
 
 # 각 guidance_scale마다 실행할 횟수
-num_runs_per_scale=5
+num_runs_per_scale=1
 
 echo "=== CIFAR10 Start Gradient 실험 ==="
 echo "Start gradients: ${start_gradients[@]}"

@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from PIL import Image
 import torchvision.transforms as transforms
-from tasks.networks.resnet import ResNet18
 from utils.configs import Arguments
 from logger import setup_logger
+from evaluations.image import ImageEvaluator
 
 def load_images_from_deepcache_layer_experiment(exp_dir):
     """Load images from a DeepCache layer experiment directory"""
@@ -45,8 +45,8 @@ def load_images_from_deepcache_layer_experiment(exp_dir):
     
     return all_images
 
-def calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir, target_class=4):
-    """Calculate condition accuracy for a specific DeepCache layer experiment"""
+def calculate_fid_for_deepcache_layer_experiment(exp_dir, target_class=4):
+    """Calculate FID score for a specific DeepCache layer experiment"""
     try:
         # Load generated images
         generated_images = load_images_from_deepcache_layer_experiment(exp_dir)
@@ -54,50 +54,35 @@ def calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir, target_
             print(f"No images found for experiment: {exp_dir}")
             return None
         
-        # Setup configuration
+        # Setup configuration for FID calculation
         config_args = Arguments()
-        config_args.targets = [str(target_class)]
-        config_args.tasks = ['classifier']
-        config_args.eval_batch_size = 32
+        config_args.data_type = 'image'
+        config_args.dataset = 'cifar10'
         config_args.image_size = 32
-        config_args.classifiers_path = "tasks/classifiers"
-        config_args.args_classifiers_path = "tasks/classifiers"
+        config_args.eval_batch_size = 32
         config_args.logging_dir = "logs"
         config_args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        config_args.targets = [str(target_class)]  # target class for FID calculation
+        config_args.tasks = ['label_guidance']
+        config_args.guide_networks = ['resnet_cifar10.pt']
         
         # Setup logger
         setup_logger(config_args)
         
-        # ResNet18 classifier 로드
-        classifier = ResNet18(targets=target_class, guide_network='resnet_cifar10.pt')
-        classifier = classifier.to(config_args.device)
-        classifier.eval()
+        # Create ImageEvaluator for FID calculation
+        evaluator = ImageEvaluator(config_args)
         
-        # Convert images to tensors
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-        ])
+        # Calculate FID score
+        print(f"Calculating FID score for {len(generated_images)} images...")
+        # target을 단일 값으로 전달 (첫 번째 값 사용)
+        target = config_args.targets[0] if isinstance(config_args.targets, list) else config_args.targets
+        fid_score = evaluator._compute_fid(generated_images, config_args.dataset, target)
         
-        image_tensors = []
-        for img in generated_images:
-            tensor = transform(img)
-            image_tensors.append(tensor)
-        
-        # Stack tensors
-        batch = torch.stack(image_tensors).to(config_args.device)
-        
-        # Calculate accuracy
-        with torch.no_grad():
-            outputs = classifier(batch)  # target class에 대한 log probability 반환
-            probabilities = torch.exp(outputs)  # log probability를 probability로 변환
-            accuracy = probabilities.mean().item()
-        
-        print(f"Condition accuracy: {accuracy:.4f}")
-        return accuracy
+        print(f"FID score: {fid_score:.4f}")
+        return fid_score
         
     except Exception as e:
-        print(f"Error calculating condition accuracy for {exp_dir}: {e}")
+        print(f"Error calculating FID for {exp_dir}: {e}")
         return None
 
 def process_deepcache_layer_experiments(experiment_base_dir):
@@ -132,13 +117,13 @@ def process_deepcache_layer_experiments(experiment_base_dir):
             layer_depth = int(parts[5])
             
             print(f"\nProcessing: cache_interval={cache_interval}, layer_depth={layer_depth}")
-            accuracy = calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir)
+            fid_score = calculate_fid_for_deepcache_layer_experiment(exp_dir)
             
             results.append({
                 'experiment_dir': os.path.basename(experiment_base_dir),
                 'cache_interval': cache_interval,
                 'layer_depth': layer_depth,
-                'condition_accuracy': accuracy
+                'fid_score': fid_score
             })
             
         except (ValueError, IndexError) as e:
@@ -153,7 +138,7 @@ def save_results_to_csv(results, filename):
         print("No results to save")
         return
     
-    headers = ['experiment_dir', 'cache_interval', 'layer_depth', 'condition_accuracy']
+    headers = ['experiment_dir', 'cache_interval', 'layer_depth', 'fid_score']
     
     with open(filename, 'w') as f:
         # Write header
@@ -161,19 +146,19 @@ def save_results_to_csv(results, filename):
         
         # Write data
         for result in results:
-            if result['condition_accuracy'] is not None:
-                f.write(f"{result['experiment_dir']},{result['cache_interval']},{result['layer_depth']},{result['condition_accuracy']:.4f}\n")
+            if result['fid_score'] is not None:
+                f.write(f"{result['experiment_dir']},{result['cache_interval']},{result['layer_depth']},{result['fid_score']:.4f}\n")
     
     print(f"Results saved to: {filename}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Calculate condition accuracy for DeepCache layer experiments')
+    parser = argparse.ArgumentParser(description='Calculate FID score for DeepCache layer experiments')
     parser.add_argument('--experiment_dir', type=str, 
                        default='deepcache_layer_experiments_target=4_20250814_230742',
                        help='Directory containing DeepCache layer experiment directories')
     parser.add_argument('--target_class', type=int, default=4,
-                       help='Target class for condition accuracy calculation (default: 4)')
-    parser.add_argument('--output_file', type=str, default='deepcache_layer_condition_accuracy_results.csv',
+                       help='Target class for FID calculation (default: 4)')
+    parser.add_argument('--output_file', type=str, default='deepcache_layer_fid_results.csv',
                        help='Output CSV file name')
     
     args = parser.parse_args()
@@ -188,30 +173,30 @@ def main():
         # 결과 요약
         print(f"\n=== Summary ===")
         print(f"Total experiments processed: {len(results)}")
-        valid_results = [r for r in results if r['condition_accuracy'] is not None]
+        valid_results = [r for r in results if r['fid_score'] is not None]
         print(f"Valid results: {len(valid_results)}")
         
         if valid_results:
-            accuracies = [r['condition_accuracy'] for r in valid_results]
-            print(f"Average condition accuracy: {np.mean(accuracies):.4f}")
-            print(f"Min condition accuracy: {np.min(accuracies):.4f}")
-            print(f"Max condition accuracy: {np.max(accuracies):.4f}")
+            fid_scores = [r['fid_score'] for r in valid_results]
+            print(f"Average FID score: {np.mean(fid_scores):.4f}")
+            print(f"Min FID score: {np.min(fid_scores):.4f}")
+            print(f"Max FID score: {np.max(fid_scores):.4f}")
             
             # Cache interval별 평균
             cache_intervals = set(r['cache_interval'] for r in valid_results)
             print(f"\n=== Cache Interval별 평균 ===")
             for cache_interval in sorted(cache_intervals):
                 interval_results = [r for r in valid_results if r['cache_interval'] == cache_interval]
-                interval_accuracies = [r['condition_accuracy'] for r in interval_results]
-                print(f"Cache Interval {cache_interval}: {np.mean(interval_accuracies):.4f} (n={len(interval_results)})")
+                interval_fids = [r['fid_score'] for r in interval_results]
+                print(f"Cache Interval {cache_interval}: {np.mean(interval_fids):.4f} (n={len(interval_results)})")
             
             # Layer depth별 평균
             layer_depths = set(r['layer_depth'] for r in valid_results)
             print(f"\n=== Layer Depth별 평균 ===")
             for layer_depth in sorted(layer_depths):
                 depth_results = [r for r in valid_results if r['layer_depth'] == layer_depth]
-                depth_accuracies = [r['condition_accuracy'] for r in depth_results]
-                print(f"Layer Depth {layer_depth}: {np.mean(depth_accuracies):.4f} (n={len(depth_results)})")
+                depth_fids = [r['fid_score'] for r in depth_results]
+                print(f"Layer Depth {layer_depth}: {np.mean(depth_fids):.4f} (n={len(depth_results)})")
     else:
         print("No results found")
 

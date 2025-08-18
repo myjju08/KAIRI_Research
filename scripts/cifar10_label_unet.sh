@@ -35,7 +35,7 @@ iter_steps=4
 
 use_deepcache=True
 cache_interval=5
-cache_block_id=1
+cache_block_id=0
 skip_mode='uniform'
 
 echo "=== 설정 정보 ==="

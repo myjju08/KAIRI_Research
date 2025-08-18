@@ -43,9 +43,19 @@ class UViT_ReverseSDE(ReverseSDE):
 
 @torch.no_grad()
 def uvit_step(x, t, model, model_name_or_path, image_size, **kwargs):
-    # UViT 모델 로드
-    uvit_model = UViT(img_size=image_size, patch_size=2, embed_dim=512, depth=12, num_heads=8).to(x.device)
-    state_dict = torch.load(model_name_or_path, map_location=x.device)
+    # UViT 모델 로드 - CUDA_VISIBLE_DEVICES가 설정되어 있으면 해당 GPU 사용
+    import os
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        cuda_device = os.environ['CUDA_VISIBLE_DEVICES']
+        if cuda_device.isdigit():
+            device = torch.device(f'cuda:{cuda_device}')
+        else:
+            device = x.device
+    else:
+        device = x.device
+    
+    uvit_model = UViT(img_size=image_size, patch_size=2, embed_dim=512, depth=12, num_heads=8).to(device)
+    state_dict = torch.load(model_name_or_path, map_location=device)
     uvit_model.load_state_dict(state_dict)
     uvit_model.eval()
     sde_obj = UViT_VPSDE(beta_min=0.1, beta_max=20)
@@ -56,7 +66,9 @@ def uvit_step(x, t, model, model_name_or_path, image_size, **kwargs):
     eps = 1e-3
     T = 1
     timesteps = np.append(0., np.linspace(eps, T, sample_steps))
-    timesteps = torch.tensor(timesteps).to(x)
+    timesteps = torch.tensor(timesteps).to(device)
+    # x를 같은 디바이스로 이동
+    x = x.to(device)
     # t는 step 인덱스, t_idx
     t_idx = t[0].item() if isinstance(t, torch.Tensor) else int(t)
     s = timesteps[t_idx]
@@ -569,16 +581,23 @@ class ImageSampler(BaseSampler):
                     except (ValueError, TypeError):
                         pass
                 
+                # RSDE 시간격자 (원본 UViT 구현과 동일한 방식)
+                eps = 1e-3
+                T_val = 1.0
+                timesteps = np.append(0., np.linspace(eps, T_val, self.inference_steps))
+                timesteps = torch.tensor(timesteps, device=device, dtype=torch.float32)
+                
                 for t_idx in reversed(range(self.inference_steps)):
                     t = torch.full((n,), t_idx, device=device, dtype=torch.long)
                     guidance_scale_value = getattr(self.args, 'guidance_scale', 1.0)
                     start_gradient_value = getattr(self.args, 'start_gradient', None)
-                    print(f"[DEBUG] guidance_scale from args: {guidance_scale_value}, start_gradient: {start_gradient_value}")
+                    # UViT는 guide_step 내부에서 RSDE 무조건 진행 (guidance_scale=0이면 guidance는 생략)
                     x = guidance.guide_step(
                         x, t, self.model, None, None, None, 0.0,
                         class_labels=class_labels, cfg_scale=0.0, diffusion=None,
                         model_type='uvit', model_name_or_path=self.model_name_or_path, image_size=self.image_size,
-                        guidance_scale=guidance_scale_value, start_gradient=start_gradient_value
+                        guidance_scale=guidance_scale_value, start_gradient=start_gradient_value,
+                        rsde=self.rsde, uvit_timesteps=timesteps
                     )
                 return x
             self.sample = uvit_sample_fn
