@@ -11,4 +11,4 @@ logs/
 *.pt
 *.pkl
 *.bin
-*.pickle
+*.picklenohup.out
