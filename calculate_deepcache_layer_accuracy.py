@@ -10,10 +10,11 @@ from tasks.networks.resnet import ResNet18
 from utils.configs import Arguments
 from logger import setup_logger
 
-def load_images_from_deepcache_experiment(exp_dir):
-    """Load images from a DeepCache experiment directory"""
+def load_images_from_deepcache_layer_experiment(exp_dir):
+    """Load images from a DeepCache layer experiment directory"""
     all_images = []
     
+    # DeepCache layer 실험 디렉토리 구조: cache_interval_X_layer_depth_Y/guidance_name=.../model=.../guide_net=.../target=.../bon=.../guidance_strength=...
     # images.npy 파일 찾기
     images_file = None
     for root, dirs, files in os.walk(exp_dir):
@@ -44,11 +45,11 @@ def load_images_from_deepcache_experiment(exp_dir):
     
     return all_images
 
-def calculate_condition_accuracy_for_deepcache_experiment(exp_dir, target_class=6):
-    """Calculate condition accuracy for a specific DeepCache experiment"""
+def calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir, target_class=4):
+    """Calculate condition accuracy for a specific DeepCache layer experiment"""
     try:
         # Load generated images
-        generated_images = load_images_from_deepcache_experiment(exp_dir)
+        generated_images = load_images_from_deepcache_layer_experiment(exp_dir)
         if not generated_images:
             print(f"No images found for experiment: {exp_dir}")
             return None
@@ -67,7 +68,7 @@ def calculate_condition_accuracy_for_deepcache_experiment(exp_dir, target_class=
         # Setup logger
         setup_logger(config_args)
         
-        # ResNet18 classifier 로드 - target_class에 맞는 guide_network 사용
+        # ResNet18 classifier 로드
         classifier = ResNet18(targets=target_class, guide_network='resnet_cifar10.pt')
         classifier = classifier.to(config_args.device)
         classifier.eval()
@@ -100,7 +101,7 @@ def calculate_condition_accuracy_for_deepcache_experiment(exp_dir, target_class=
         return None
 
 def process_deepcache_layer_experiments(experiment_base_dir):
-    """Process DeepCache layer experiments"""
+    """Process all DeepCache layer experiments"""
     print(f"=== Processing DeepCache layer experiments from: {experiment_base_dir} ===")
     
     if not os.path.exists(experiment_base_dir):
@@ -109,30 +110,40 @@ def process_deepcache_layer_experiments(experiment_base_dir):
     
     results = []
     
-    # 각 실험 서브디렉토리 찾기 (cache_interval_X_layer_depth_Y 형태)
+    # 실험 디렉토리 찾기 (cache_interval_X_layer_depth_Y 형태)
+    experiment_dirs = []
     for item in os.listdir(experiment_base_dir):
         if item.startswith("cache_interval_") and os.path.isdir(os.path.join(experiment_base_dir, item)):
-            cache_layer_dir = os.path.join(experiment_base_dir, item)
+            experiment_dirs.append(os.path.join(experiment_base_dir, item))
+    
+    if not experiment_dirs:
+        print(f"No DeepCache layer experiment directories found in: {experiment_base_dir}")
+        return []
+    
+    # 각 실험 디렉토리 처리
+    for exp_dir in experiment_dirs:
+        print(f"\nProcessing experiment directory: {exp_dir}")
+        
+        # cache_interval_X_layer_depth_Y에서 X와 Y 추출
+        try:
+            dir_name = os.path.basename(exp_dir)
+            parts = dir_name.split("_")
+            cache_interval = int(parts[2])
+            layer_depth = int(parts[5])
             
-            # cache_interval_X_layer_depth_Y에서 X와 Y 추출
-            try:
-                parts = item.split("_")
-                cache_interval = int(parts[2])
-                layer_depth = int(parts[5])  # layer_depth는 5번째 인덱스
-                
-                print(f"\nProcessing: cache_interval={cache_interval}, layer_depth={layer_depth}")
-                accuracy = calculate_condition_accuracy_for_deepcache_experiment(cache_layer_dir)
-                
-                results.append({
-                    'experiment_dir': os.path.basename(experiment_base_dir),
-                    'cache_interval': cache_interval,
-                    'layer_depth': layer_depth,
-                    'condition_accuracy': accuracy
-                })
-                
-            except (ValueError, IndexError) as e:
-                print(f"Error parsing directory name {item}: {e}")
-                continue
+            print(f"\nProcessing: cache_interval={cache_interval}, layer_depth={layer_depth}")
+            accuracy = calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir)
+            
+            results.append({
+                'experiment_dir': os.path.basename(experiment_base_dir),
+                'cache_interval': cache_interval,
+                'layer_depth': layer_depth,
+                'condition_accuracy': accuracy
+            })
+            
+        except (ValueError, IndexError) as e:
+            print(f"Error parsing directory name {os.path.basename(exp_dir)}: {e}")
+            continue
     
     return results
 
@@ -157,11 +168,12 @@ def save_results_to_csv(results, filename):
 
 def main():
     parser = argparse.ArgumentParser(description='Calculate condition accuracy for DeepCache layer experiments')
-    parser.add_argument('--experiment_dir', type=str, required=True, 
-                       help='DeepCache layer experiment directory')
-    parser.add_argument('--target_class', type=int, default=2,
-                       help='Target class for condition accuracy calculation (default: 2)')
-    parser.add_argument('--output_file', type=str, required=True,
+    parser.add_argument('--experiment_dir', type=str, 
+                       default='deepcache_layer_experiments_target=4_20250814_230742',
+                       help='Directory containing DeepCache layer experiment directories')
+    parser.add_argument('--target_class', type=int, default=4,
+                       help='Target class for condition accuracy calculation (default: 4)')
+    parser.add_argument('--output_file', type=str, default='deepcache_layer_condition_accuracy_results.csv',
                        help='Output CSV file name')
     
     args = parser.parse_args()
@@ -185,14 +197,6 @@ def main():
             print(f"Min condition accuracy: {np.min(accuracies):.4f}")
             print(f"Max condition accuracy: {np.max(accuracies):.4f}")
             
-            # Layer depth별 평균
-            layer_depths = set(r['layer_depth'] for r in valid_results)
-            print(f"\n=== Layer Depth별 평균 ===")
-            for layer_depth in sorted(layer_depths):
-                depth_results = [r for r in valid_results if r['layer_depth'] == layer_depth]
-                depth_accuracies = [r['condition_accuracy'] for r in depth_results]
-                print(f"Layer Depth {layer_depth}: {np.mean(depth_accuracies):.4f} (n={len(depth_results)})")
-            
             # Cache interval별 평균
             cache_intervals = set(r['cache_interval'] for r in valid_results)
             print(f"\n=== Cache Interval별 평균 ===")
@@ -200,6 +204,14 @@ def main():
                 interval_results = [r for r in valid_results if r['cache_interval'] == cache_interval]
                 interval_accuracies = [r['condition_accuracy'] for r in interval_results]
                 print(f"Cache Interval {cache_interval}: {np.mean(interval_accuracies):.4f} (n={len(interval_results)})")
+            
+            # Layer depth별 평균
+            layer_depths = set(r['layer_depth'] for r in valid_results)
+            print(f"\n=== Layer Depth별 평균 ===")
+            for layer_depth in sorted(layer_depths):
+                depth_results = [r for r in valid_results if r['layer_depth'] == layer_depth]
+                depth_accuracies = [r['condition_accuracy'] for r in depth_results]
+                print(f"Layer Depth {layer_depth}: {np.mean(depth_accuracies):.4f} (n={len(depth_results)})")
     else:
         print("No results found")
 

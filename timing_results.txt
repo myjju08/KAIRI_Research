@@ -568,3 +568,90 @@
 실행 시간: 20초 (0분 20초)
 설정: DeepCache=True, Cache_Interval=5, Steps=50
 ---
+실행 시간: 21초 (0분 21초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 13초 (0분 13초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 13초 (0분 13초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 23초 (0분 23초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 11초 (0분 11초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 12초 (0분 12초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 17초 (0분 17초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
+실행 시간: 13초 (0분 13초)
+설정: DeepCache=True, Cache_Interval=5, Steps=50
+---
