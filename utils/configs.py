@@ -40,7 +40,6 @@ class Arguments:
     # DeepCache related
     use_deepcache: bool = field(default=False)
     cache_interval: int = field(default=1)
-    cache_layer_id: Optional[int] = field(default=None)
     cache_block_id: Optional[int] = field(default=None)
     skip_mode: str = field(default='uniform')
     clean_step: Optional[int] = field(default=None)  # Clean 이미지 근처에서 DeepCache 사용 안함

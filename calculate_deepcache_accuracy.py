@@ -100,7 +100,7 @@ def calculate_condition_accuracy_for_deepcache_experiment(exp_dir, target_class=
         print(f"Error calculating condition accuracy for {exp_dir}: {e}")
         return None
 
-def process_deepcache_experiments(experiment_base_dir):
+def process_deepcache_experiments(experiment_base_dir, target_class=2):
     """Process all DeepCache experiments"""
     print(f"=== Processing DeepCache experiments from: {experiment_base_dir} ===")
     
@@ -110,44 +110,72 @@ def process_deepcache_experiments(experiment_base_dir):
     
     results = []
     
-    # 실험 디렉토리 찾기 (deepcache_experiments_YYYYMMDD_HHMMSS 형태)
+    # 실험 디렉토리 찾기 (deepcache_experiments_YYYYMMDD_HHMMSS 형태 또는 직접 디렉토리)
     experiment_dirs = []
-    for item in os.listdir(experiment_base_dir):
-        if item.startswith("deepcache_experiments_"):
-            experiment_dirs.append(os.path.join(experiment_base_dir, item))
+    
+    # 직접 디렉토리인지 확인
+    if os.path.basename(experiment_base_dir).startswith("deepcache_"):
+        experiment_dirs = [experiment_base_dir]
+    else:
+        # 하위 디렉토리에서 찾기
+        for item in os.listdir(experiment_base_dir):
+            if item.startswith("deepcache_"):
+                experiment_dirs.append(os.path.join(experiment_base_dir, item))
     
     if not experiment_dirs:
         print(f"No DeepCache experiment directories found in: {experiment_base_dir}")
         return []
     
-    # 가장 최근 실험 디렉토리 사용 (또는 모든 디렉토리 처리)
+    # 각 실험 디렉토리 처리
     for exp_dir in experiment_dirs:
         print(f"\nProcessing experiment directory: {exp_dir}")
         
-        # 각 실험 서브디렉토리 찾기 (cache_X_clean_Y 형태)
+        # 각 실험 서브디렉토리 찾기 (clean_step_X_cache_depth_Y 또는 cache_X_clean_Y 형태)
         for item in os.listdir(exp_dir):
-            if item.startswith("cache_") and os.path.isdir(os.path.join(exp_dir, item)):
-                cache_clean_dir = os.path.join(exp_dir, item)
-                
-                # cache_X_clean_Y에서 X와 Y 추출
-                try:
-                    parts = item.split("_")
-                    cache_interval = int(parts[1])
-                    clean_step = int(parts[3])
-                    
-                    print(f"\nProcessing: cache_interval={cache_interval}, clean_step={clean_step}")
-                    accuracy = calculate_condition_accuracy_for_deepcache_experiment(cache_clean_dir)
-                    
-                    results.append({
-                        'experiment_dir': os.path.basename(exp_dir),
-                        'cache_interval': cache_interval,
-                        'clean_step': clean_step,
-                        'condition_accuracy': accuracy
-                    })
-                    
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing directory name {item}: {e}")
-                    continue
+            if os.path.isdir(os.path.join(exp_dir, item)):
+                if item.startswith("clean_step_"):
+                    # clean_step_X_cache_depth_Y 형태
+                    clean_cache_dir = os.path.join(exp_dir, item)
+                    try:
+                        parts = item.split("_")
+                        clean_step = int(parts[2])
+                        cache_depth = int(parts[5])
+                        
+                        print(f"\nProcessing: clean_step={clean_step}, cache_depth={cache_depth}")
+                        accuracy = calculate_condition_accuracy_for_deepcache_experiment(clean_cache_dir, target_class=target_class)
+                        
+                        results.append({
+                            'experiment_dir': os.path.basename(exp_dir),
+                            'clean_step': clean_step,
+                            'cache_depth': cache_depth,
+                            'condition_accuracy': accuracy
+                        })
+                        
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing directory name {item}: {e}")
+                        continue
+                        
+                elif item.startswith("cache_"):
+                    # cache_X_clean_Y 형태
+                    cache_clean_dir = os.path.join(exp_dir, item)
+                    try:
+                        parts = item.split("_")
+                        cache_interval = int(parts[1])
+                        clean_step = int(parts[3])
+                        
+                        print(f"\nProcessing: cache_interval={cache_interval}, clean_step={clean_step}")
+                        accuracy = calculate_condition_accuracy_for_deepcache_experiment(cache_clean_dir, target_class=target_class)
+                        
+                        results.append({
+                            'experiment_dir': os.path.basename(exp_dir),
+                            'cache_interval': cache_interval,
+                            'clean_step': clean_step,
+                            'condition_accuracy': accuracy
+                        })
+                        
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing directory name {item}: {e}")
+                        continue
     
     return results
 
@@ -157,7 +185,11 @@ def save_results_to_csv(results, filename):
         print("No results to save")
         return
     
-    headers = ['experiment_dir', 'cache_interval', 'clean_step', 'condition_accuracy']
+    # 결과에 따라 헤더 결정
+    if 'cache_depth' in results[0]:
+        headers = ['experiment_dir', 'clean_step', 'cache_depth', 'condition_accuracy']
+    else:
+        headers = ['experiment_dir', 'cache_interval', 'clean_step', 'condition_accuracy']
     
     with open(filename, 'w') as f:
         # Write header
@@ -166,7 +198,10 @@ def save_results_to_csv(results, filename):
         # Write data
         for result in results:
             if result['condition_accuracy'] is not None:
-                f.write(f"{result['experiment_dir']},{result['cache_interval']},{result['clean_step']},{result['condition_accuracy']:.4f}\n")
+                if 'cache_depth' in result:
+                    f.write(f"{result['experiment_dir']},{result['clean_step']},{result['cache_depth']},{result['condition_accuracy']:.4f}\n")
+                else:
+                    f.write(f"{result['experiment_dir']},{result['cache_interval']},{result['clean_step']},{result['condition_accuracy']:.4f}\n")
     
     print(f"Results saved to: {filename}")
 
@@ -182,7 +217,7 @@ def main():
     args = parser.parse_args()
     
     # DeepCache 실험 처리
-    results = process_deepcache_experiments(args.experiment_dir)
+    results = process_deepcache_experiments(args.experiment_dir, args.target_class)
     
     if results:
         # CSV 파일로 저장
@@ -200,14 +235,6 @@ def main():
             print(f"Min condition accuracy: {np.min(accuracies):.4f}")
             print(f"Max condition accuracy: {np.max(accuracies):.4f}")
             
-            # Cache interval별 평균
-            cache_intervals = set(r['cache_interval'] for r in valid_results)
-            print(f"\n=== Cache Interval별 평균 ===")
-            for cache_interval in sorted(cache_intervals):
-                interval_results = [r for r in valid_results if r['cache_interval'] == cache_interval]
-                interval_accuracies = [r['condition_accuracy'] for r in interval_results]
-                print(f"Cache Interval {cache_interval}: {np.mean(interval_accuracies):.4f} (n={len(interval_results)})")
-            
             # Clean step별 평균
             clean_steps = set(r['clean_step'] for r in valid_results)
             print(f"\n=== Clean Step별 평균 ===")
@@ -215,6 +242,22 @@ def main():
                 step_results = [r for r in valid_results if r['clean_step'] == clean_step]
                 step_accuracies = [r['condition_accuracy'] for r in step_results]
                 print(f"Clean Step {clean_step}: {np.mean(step_accuracies):.4f} (n={len(step_results)})")
+            
+            # Cache depth/interval별 평균
+            if 'cache_depth' in valid_results[0]:
+                cache_depths = set(r['cache_depth'] for r in valid_results)
+                print(f"\n=== Cache Depth별 평균 ===")
+                for cache_depth in sorted(cache_depths):
+                    depth_results = [r for r in valid_results if r['cache_depth'] == cache_depth]
+                    depth_accuracies = [r['condition_accuracy'] for r in depth_results]
+                    print(f"Cache Depth {cache_depth}: {np.mean(depth_accuracies):.4f} (n={len(depth_results)})")
+            else:
+                cache_intervals = set(r['cache_interval'] for r in valid_results)
+                print(f"\n=== Cache Interval별 평균 ===")
+                for cache_interval in sorted(cache_intervals):
+                    interval_results = [r for r in valid_results if r['cache_interval'] == cache_interval]
+                    interval_accuracies = [r['condition_accuracy'] for r in interval_results]
+                    print(f"Cache Interval {cache_interval}: {np.mean(interval_accuracies):.4f} (n={len(interval_results)})")
     else:
         print("No results found")
 

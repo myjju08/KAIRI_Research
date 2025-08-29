@@ -100,7 +100,7 @@ def calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir, target_
         print(f"Error calculating condition accuracy for {exp_dir}: {e}")
         return None
 
-def process_deepcache_layer_experiments(experiment_base_dir):
+def process_deepcache_layer_experiments(experiment_base_dir, target_class=4):
     """Process all DeepCache layer experiments"""
     print(f"=== Processing DeepCache layer experiments from: {experiment_base_dir} ===")
     
@@ -132,7 +132,7 @@ def process_deepcache_layer_experiments(experiment_base_dir):
             layer_depth = int(parts[5])
             
             print(f"\nProcessing: cache_interval={cache_interval}, layer_depth={layer_depth}")
-            accuracy = calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir)
+            accuracy = calculate_condition_accuracy_for_deepcache_layer_experiment(exp_dir, target_class=target_class)
             
             results.append({
                 'experiment_dir': os.path.basename(experiment_base_dir),
@@ -179,7 +179,7 @@ def main():
     args = parser.parse_args()
     
     # DeepCache layer 실험 처리
-    results = process_deepcache_layer_experiments(args.experiment_dir)
+    results = process_deepcache_layer_experiments(args.experiment_dir, args.target_class)
     
     if results:
         # CSV 파일로 저장
