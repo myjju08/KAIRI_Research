@@ -18,7 +18,7 @@ echo "시작 시간: $(date)"
 start_time=$(date +%s)
 
 # 기본 설정
-CUDA_VISIBLE_DEVICES=3
+CUDA_VISIBLE_DEVICES=0
 data_type=image
 task=label_guidance
 image_size=32
@@ -50,7 +50,7 @@ skip_mode='uniform'
 
 # 실험 설정
 # 1. Target classes: 1, 3, 5, 7
-targets=(9)
+targets=(3 5 7)
 
 # 2. Deep cache interval: 5 (0~clean_step은 full, clean_step~50은 deep cache)
 cache_interval=5
