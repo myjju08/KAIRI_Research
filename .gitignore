@@ -13,3 +13,8 @@ logs/
 *.bin
 *.picklenohup.out
 nohup.out
+
+# ignore large outputs and weights
+nohup.out
+models/*.pt
+models/*.pth
