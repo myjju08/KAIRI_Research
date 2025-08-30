@@ -12,3 +12,4 @@ logs/
 *.pkl
 *.bin
 *.picklenohup.out
+nohup.out
