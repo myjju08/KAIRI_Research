@@ -738,7 +738,7 @@ class DPSGuidance(BaseGuidance):
                 
                 # 대신 DPS 논문에서 제안하는 방법 사용
                 # posterior variance 대신 guidance scale 사용
-                guidance_scale = 0.3
+                guidance_scale = 1.0
                 
                 # Gradient normalization for numerical stability
                 grad_norm = grad_z_t.flatten(1).norm(p=2, dim=1).view(-1, 1, 1, 1)
