@@ -68,13 +68,21 @@ def get_diffusion(args):
         - model_dir: str (root dir for checkpoints) - optional
     """
     
-    # 1. Create DiT-XL/2 model
-    # DiT uses latent space: input_size = image_size // 8
+    # 1. Create DiT model (파일명/args.model 기반 선택)
     latent_size = args.image_size // 8
-    model = DiT_models['DiT-XL/2'](
-        input_size=latent_size,  # 256 -> 32 for latent space
-        in_channels=getattr(args, "in_channels", 4),  # DiT uses 4 channels in latent space
-        learn_sigma=getattr(args, "learn_sigma", True),  # Keep True to match checkpoint
+    model_key = getattr(args, "model", None)
+    if model_key is None:
+        name_lower = os.path.basename(args.model_name_or_path).lower()
+        if "s4" in name_lower:
+            model_key = "DiT-S/4"
+        elif "xl4" in name_lower:
+            model_key = "DiT-XL/4"
+        else:
+            model_key = "DiT-XL/2"
+    model = DiT_models[model_key](
+        input_size=latent_size,
+        in_channels=getattr(args, "in_channels", 4),
+        learn_sigma=getattr(args, "learn_sigma", True),
     )
     
     # 2. Load checkpoint
@@ -247,6 +255,17 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
+    def residual_only(self, x, c):
+        """
+        Return only the residual branch Δ_k without adding the skip.
+        Useful for gated guidance where residual grads are selectively detached.
+        """
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        attn_in = modulate(self.norm1(x), shift_msa, scale_msa)
+        delta_attn = gate_msa.unsqueeze(1) * self.attn(attn_in)
+        delta_mlp = gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return delta_attn + delta_mlp
+
 
 class FinalLayer(nn.Module):
     """
@@ -383,6 +402,39 @@ class DiT(nn.Module):
             x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        return x
+
+    def forward_with_residual_detach(self, x, t, y, active_blocks=None):
+        """
+        Forward pass for guidance where only selected blocks pass gradients through the residual.
+        Blocks not in active_blocks have their residual Δ_k detached; forward values stay identical.
+        """
+        x = self.x_embedder(x) + self.pos_embed
+        t = self.t_embedder(t)
+
+        if y is None:
+            batch_size = x.shape[0]
+            device = t.device
+            y = th.zeros(batch_size, self.y_embedder.embedding_table.embedding_dim, device=device)
+        else:
+            y = self.y_embedder(y, self.training)
+
+        if y.device != t.device:
+            y = y.to(t.device)
+
+        c = t + y
+        active = set(active_blocks) if active_blocks is not None else None
+
+        # Debug해서 잘 넘어오는거 확인했음
+
+        for idx, block in enumerate(self.blocks):
+            delta = block.residual_only(x, c)
+            if active is not None and idx not in active:
+                delta = delta.detach()
+            x = x + delta
+
+        x = self.final_layer(x, c)
+        x = self.unpatchify(x)
         return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale):

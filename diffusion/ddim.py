@@ -512,10 +512,11 @@ class ImageSampler(BaseSampler):
         if hasattr(args, 'model_type') and args.model_type is not None:
             self.model_type = args.model_type
         else:
-            # 기존 로직: model_name_or_path 기반 추정
-            if 'uvit' in args.model_name_or_path.lower():
+            name_lower = args.model_name_or_path.lower()
+            if 'uvit' in name_lower:
                 self.model_type = 'uvit'
-            elif 'transformer' in args.model_name_or_path.lower():
+            elif 'dit' in name_lower or 'transformer' in name_lower:
+                # DiT 계열 체크포인트(예: dit-cifar10-s4.pt)도 transformer로 분류
                 self.model_type = 'transformer'
             else:
                 self.model_type = 'unet'
@@ -608,9 +609,18 @@ class ImageSampler(BaseSampler):
             from diffusers.models import AutoencoderKL
             
             latent_size = args.image_size // 8
-            self.model = DiT_models['DiT-XL/2'](
+            # CIFAR-10용 기본값: DiT-S/4, num_classes=10
+            model_key = getattr(args, "model", None)
+            if model_key is None:
+                if "s4" in os.path.basename(args.model_name_or_path).lower():
+                    model_key = "DiT-S/4"
+                else:
+                    model_key = "DiT-XL/2"
+            num_classes = getattr(args, "num_classes", 10)
+            
+            self.model = DiT_models[model_key](
                 input_size=latent_size,
-                num_classes=1000
+                num_classes=num_classes
             ).to(args.device)
             self.model.initialize_weights()
             
@@ -626,9 +636,9 @@ class ImageSampler(BaseSampler):
                 else:
                     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path} or {models_path}")
             
-            checkpoint = torch.load(checkpoint_path, map_location=args.device)
+            checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
             state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-            self.model.load_state_dict(state_dict, strict=True)
+            self.model.load_state_dict(state_dict, strict=False)
             self.model.eval()
             
             # Diffusion 설정
@@ -643,12 +653,17 @@ class ImageSampler(BaseSampler):
             
             self.unet, self.ts, self.alpha_prod_ts, self.alpha_prod_t_prevs = get_diffusion(args)
 
-    @torch.no_grad()
     def sample(self, sample_size: int, guidance: BaseGuidance):
         # UViT는 자체 sample 함수를 사용
         if self.model_type == 'uvit':
             return self.sample(sample_size, guidance)
         
+        # dict 입력 방어
+        def _unwrap_x(x):
+            if isinstance(x, dict):
+                return x["sample"] if "sample" in x else next(iter(x.values()))
+            return x
+
         # UNet과 Transformer는 통합된 샘플링 로직 사용
         tot_samples = []
         n_batchs = math.ceil(sample_size / self.per_sample_batch_size)
@@ -658,26 +673,29 @@ class ImageSampler(BaseSampler):
             self.args.batch_id = batch_id
 
             if self.model_type == 'transformer':
-                # Transformer 샘플링
+                # Transformer 샘플링 (gradient 필요)
                 batch_size = min(self.per_sample_batch_size, sample_size - batch_id * self.per_sample_batch_size)
                 x = torch.randn(batch_size, 4, self.args.image_size // 8, self.args.image_size // 8, device=self.device)
                 
                 for t_idx in reversed(range(self.inference_steps)):
                     t = torch.full((batch_size,), t_idx, device=self.device, dtype=torch.long)
-                    x = guidance.guide_step(
-                        x, t, self.model, None, None, None, self.eta,
-                        model_type='transformer', model_name_or_path=self.model_name_or_path, 
-                        image_size=self.args.image_size, diffusion=self.diffusion
-                    )
+                    with torch.enable_grad():
+                        x = guidance.guide_step(
+                            x, t, self.model, None, None, None, self.eta,
+                            model_type='transformer', model_name_or_path=self.model_name_or_path, 
+                            image_size=self.args.image_size, diffusion=self.diffusion
+                        )
+                    x = _unwrap_x(x)
                     
                     if self.log_traj:
                         logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t_idx}')
                 
                 # VAE decode
-                x = self.vae.decode(x / 0.18215, return_dict=False)[0]
+                with torch.no_grad():
+                    x = self.vae.decode(x / 0.18215, return_dict=False)[0]
                 
             else:
-                # UNet 샘플링 (기본)
+                # UNet 샘플링 (기본, grad 불필요)
                 batch_size = min(self.per_sample_batch_size, sample_size - batch_id * self.per_sample_batch_size)
                 x = randn_tensor(
                     shape=(batch_size, *self.object_size),
@@ -687,14 +705,16 @@ class ImageSampler(BaseSampler):
 
                 for t in tqdm(range(self.inference_steps), total=self.inference_steps):
                     
-                    x = guidance.guide_step(
-                        x, t, self.unet,
-                        self.ts,
-                        self.alpha_prod_ts, 
-                        self.alpha_prod_t_prevs,
-                        self.eta,
-                        model_type='unet'
-                    )
+                    with torch.no_grad():
+                        x = guidance.guide_step(
+                            x, t, self.unet,
+                            self.ts,
+                            self.alpha_prod_ts, 
+                            self.alpha_prod_t_prevs,
+                            self.eta,
+                            model_type='unet',
+                            t_idx=t
+                        )
 
                     if self.log_traj:
                         logger.log_samples(self.tensor_to_obj(x), fname=f'traj/time={t}')

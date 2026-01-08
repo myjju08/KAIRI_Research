@@ -5,6 +5,7 @@ from .dps import DPSGuidance
 from models.deepcache_unet import create_deepcache_unet
 import time
 import os
+import json
 
 
 class DeepCacheDPSGuidance(DPSGuidance):
@@ -30,6 +31,26 @@ class DeepCacheDPSGuidance(DPSGuidance):
 		
 		# 캐시 관련 변수들
 		self.prv_features = None
+		# gradient / cross-entropy 기록 구조
+		self.grad_updates_per_step = []  # Deprecated: 유지만 하고 사용하지 않음 (호환용)
+		self.grad_norms_per_step = []  # list of dict: { 'step': int, 'grad_norms': List[float] }
+		self.cross_entropy_per_step = []  # list of dict: { 'step': int, 'cross_entropy': List[float] }
+		self.sample_histories = {}  # dict: sample_idx -> List[Dict[str, Any]]
+		self._gradient_log_initialized = False
+		self._sample_metrics_initialized = False
+		log_dir = os.path.abspath(os.path.expanduser(getattr(args, 'logging_dir', '.')))
+		os.makedirs(log_dir, exist_ok=True)
+		target = getattr(args, 'target', 'unknown')
+		guidance_name = getattr(args, 'guidance_name', 'dps')
+		timestamp = time.strftime('%Y%m%d_%H%M%S')
+		self.gradient_log_path = os.path.join(
+			log_dir,
+			f"gradient_norms_guidance={guidance_name}_target={target}_{timestamp}.jsonl"
+		)
+		self.sample_metrics_log_path = os.path.join(
+			log_dir,
+			f"sample_metrics_guidance={guidance_name}_target={target}_{timestamp}.jsonl"
+		)
 		
 		print(f"[DeepCache] DeepCacheDPSGuidance 초기화: use_deepcache={self.use_deepcache}, cache_interval={self.cache_interval}")
 	
@@ -124,6 +145,16 @@ class DeepCacheDPSGuidance(DPSGuidance):
 				current_t = int(t)
 		
 		print(f"[DeepCache DPS Debug] _guide_step_unet 시작: t={t}, current_t={current_t}, cache_interval={self.cache_interval}, clean_step={getattr(self.args, 'clean_step', None)}")
+		# 로깅용 step index 계산 (원본 timestep 유지)
+		if isinstance(t, int):
+			step_index = int(t)
+		elif isinstance(t, torch.Tensor):
+			if t.dim() == 0:
+				step_index = int(t.item())
+			else:
+				step_index = int(t[0].item())
+		else:
+			step_index = int(t)
 		
 		# 1. epsilon 예측: 원본 UNet 사용 (DeepCache 사용 안함)
 		alpha_prod_t = alpha_prod_ts[t]
@@ -166,12 +197,21 @@ class DeepCacheDPSGuidance(DPSGuidance):
 			**kwargs
 		)
 		
+		per_sample_grad_norms = None
+		per_sample_cross_entropy = None
 		# gradient 디버깅: guidance 결과 확인
 		if guidance is not None:
 			grad_norm = torch.norm(guidance).item()
 			grad_max = torch.max(torch.abs(guidance)).item()
 			print(f"[DeepCache DPS Debug] t={t}, grad_norm: {grad_norm:.6f}, grad_max: {grad_max:.6f}")
-			
+			try:
+				if guidance.dim() == 0:
+					per_sample_grad_norms = [float(torch.abs(guidance).item())]
+				else:
+					per_sample_grad_norms = guidance.view(guidance.shape[0], -1).norm(dim=1).detach().float().cpu().tolist()
+			except Exception as e:
+				per_sample_grad_norms = None
+				print(f"[DeepCache DPS Warning] per-sample gradient norm logging failed at t={t}: {e}")
 			# gradient가 거의 0인지 확인
 			if grad_norm < 1e-8:
 				print(f"[DeepCache DPS Warning] t={t}, Gradient is almost zero! This might be a caching step.")
@@ -180,8 +220,74 @@ class DeepCacheDPSGuidance(DPSGuidance):
 		
 		# follow the schedule of DPS paper
 		logp_norm = self.guider.get_guidance(x.clone().detach(), func, return_logp=True, check_grad=False, **kwargs)
+		try:
+			if isinstance(logp_norm, torch.Tensor):
+				ce_tensor = (-logp_norm).detach().float()
+				if ce_tensor.ndim > 1:
+					ce_tensor = ce_tensor.view(ce_tensor.shape[0], -1).mean(dim=1)
+				per_sample_cross_entropy = ce_tensor.cpu().tolist()
+				if not isinstance(per_sample_cross_entropy, list):
+					per_sample_cross_entropy = [per_sample_cross_entropy]
+			elif logp_norm is not None:
+				per_sample_cross_entropy = [float(-logp_norm)]
+		except Exception as e:
+			per_sample_cross_entropy = None
+			print(f"[DeepCache DPS Debug] cross entropy logging failed at t={t}: {e}")
+		if per_sample_cross_entropy is not None and len(per_sample_cross_entropy) > 0:
+			mean_ce = sum(per_sample_cross_entropy) / len(per_sample_cross_entropy)
+			print(f"[DeepCache DPS Debug] t={t}, cross_entropy: {mean_ce:.6f}")
+		if per_sample_grad_norms is not None or per_sample_cross_entropy is not None:
+			self._log_gradient_statistics(
+				step_index=step_index,
+				grad_norms=per_sample_grad_norms,
+				current_t=current_t,
+				is_cache_update_step=is_cache_update_step,
+				cross_entropies=per_sample_cross_entropy
+			)
 		
-		x_prev = x_prev + self.args.guidance_strength * guidance / torch.abs(logp_norm.view(-1, * ([1] * (len(x_prev.shape) - 1)) ))
+		# guidance strength 스케줄 적용 (기본값은 args.guidance_strength)
+		guidance_strength = getattr(self.args, 'guidance_strength', 1.0)
+		if (
+			hasattr(self.args, 'guidance_scale_schedule') and
+			hasattr(self.args, 'guidance_transition_steps') and
+			self.args.guidance_scale_schedule is not None and
+			self.args.guidance_transition_steps is not None
+		):
+			if 't_idx' in kwargs:
+				current_step = int(kwargs['t_idx'])
+			else:
+				current_step = int(step_index)
+			guidance_strength = self._get_multi_step_guidance_scale(
+				current_step,
+				guidance_strength,
+				self.args.guidance_scale_schedule,
+				self.args.guidance_transition_steps,
+			)
+		elif (
+			hasattr(self.args, 'guidance_early') and
+			hasattr(self.args, 'guidance_late') and
+			hasattr(self.args, 'guidance_transition_step') and
+			self.args.guidance_early is not None and
+			self.args.guidance_late is not None and
+			self.args.guidance_transition_step is not None
+		):
+			if 't_idx' in kwargs:
+				current_step = int(kwargs['t_idx'])
+			else:
+				if isinstance(t_tensor, torch.Tensor):
+					if t_tensor.dim() == 0:
+						current_step = int(t_tensor.item())
+					else:
+						current_step = int(t_tensor.view(-1)[0].item())
+				else:
+					current_step = int(t_tensor)
+			guidance_strength = (
+				self.args.guidance_late
+				if current_step >= self.args.guidance_transition_step
+				else self.args.guidance_early
+			)
+
+		x_prev = x_prev + guidance_strength * guidance / torch.abs(logp_norm.view(-1, * ([1] * (len(x_prev.shape) - 1)) ))
 			
 		return x_prev
 	
@@ -216,6 +322,124 @@ class DeepCacheDPSGuidance(DPSGuidance):
 		print(f"[X0 Debug] x0.requires_grad: {x0.requires_grad}, x0.grad_fn: {x0.grad_fn}")
 		
 		return x0
+	
+	def _log_gradient_statistics(self, step_index, grad_norms=None, current_t=None, is_cache_update_step=None, cross_entropies=None):
+		record = {'step': int(step_index)}
+		if current_t is not None:
+			record['current_t'] = int(current_t)
+		if is_cache_update_step is not None:
+			record['cache_update_step'] = bool(is_cache_update_step)
+		samples_data = []
+		max_len = 0
+		if isinstance(grad_norms, list):
+			max_len = max(max_len, len(grad_norms))
+		if isinstance(cross_entropies, list):
+			max_len = max(max_len, len(cross_entropies))
+		if max_len > 0:
+			for sample_idx in range(max_len):
+				sample_entry = {'sample': sample_idx}
+				grad_value = None
+				ce_value = None
+				if isinstance(grad_norms, list) and sample_idx < len(grad_norms):
+					grad_value = grad_norms[sample_idx]
+					sample_entry['grad_norm'] = grad_value
+				if isinstance(cross_entropies, list) and sample_idx < len(cross_entropies):
+					ce_value = cross_entropies[sample_idx]
+					sample_entry['cross_entropy'] = ce_value
+				if grad_value is not None or ce_value is not None:
+					samples_data.append(sample_entry)
+					sample_history_entry = {
+						'step': int(step_index),
+						'grad_norm': grad_value,
+						'cross_entropy': ce_value
+					}
+					if current_t is not None:
+						sample_history_entry['current_t'] = int(current_t)
+					self.sample_histories.setdefault(sample_idx, []).append(sample_history_entry)
+		if samples_data:
+			record['samples'] = samples_data
+			if isinstance(grad_norms, list):
+				self.grad_norms_per_step.append({
+					'step': int(step_index),
+					'grad_norms': grad_norms,
+				})
+			if isinstance(cross_entropies, list):
+				self.cross_entropy_per_step.append({
+					'step': int(step_index),
+					'cross_entropy': cross_entropies,
+				})
+		self._write_gradient_record(record)
+		if samples_data:
+			self._write_sample_records(samples_data, step_index=step_index, current_t=current_t)
+
+	def _write_gradient_record(self, record):
+		if not hasattr(self, 'gradient_log_path') or self.gradient_log_path is None:
+			return
+		try:
+			dirname = os.path.dirname(self.gradient_log_path)
+			if dirname:
+				os.makedirs(dirname, exist_ok=True)
+			mode = 'a'
+			if not self._gradient_log_initialized:
+				mode = 'w'
+			with open(self.gradient_log_path, mode, encoding='utf-8') as f:
+				if not self._gradient_log_initialized:
+					meta = {
+						'guidance_name': getattr(self.args, 'guidance_name', 'dps'),
+						'target': getattr(self.args, 'target', None),
+						'use_deepcache': self.use_deepcache,
+						'cache_interval': self.cache_interval,
+						'cache_block_id': self.cache_block_id,
+						'model_type': self.model_type,
+						'iter_steps': getattr(self.args, 'iter_steps', None),
+						'guidance_strength': getattr(self.args, 'guidance_strength', None),
+						'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+					}
+					f.write(json.dumps({'meta': meta}) + "\n")
+					self._gradient_log_initialized = True
+				f.write(json.dumps(record) + "\n")
+		except Exception as e:
+			print(f"[DeepCache DPS Warning] Failed to log gradient statistics: {e}")
+
+	def _write_sample_records(self, samples, step_index, current_t=None):
+		if not hasattr(self, 'sample_metrics_log_path') or self.sample_metrics_log_path is None:
+			return
+		if not samples:
+			return
+		try:
+			dirname = os.path.dirname(self.sample_metrics_log_path)
+			if dirname:
+				os.makedirs(dirname, exist_ok=True)
+			mode = 'a'
+			if not self._sample_metrics_initialized:
+				mode = 'w'
+			with open(self.sample_metrics_log_path, mode, encoding='utf-8') as f:
+				if not self._sample_metrics_initialized:
+					meta = {
+						'guidance_name': getattr(self.args, 'guidance_name', 'dps'),
+						'target': getattr(self.args, 'target', None),
+						'use_deepcache': self.use_deepcache,
+						'cache_interval': self.cache_interval,
+						'cache_block_id': self.cache_block_id,
+						'model_type': self.model_type,
+						'iter_steps': getattr(self.args, 'iter_steps', None),
+						'guidance_strength': getattr(self.args, 'guidance_strength', None),
+						'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+					}
+					f.write(json.dumps({'meta': meta}) + "\n")
+					self._sample_metrics_initialized = True
+				for sample in samples:
+					entry = {
+						'step': int(step_index),
+						'sample': int(sample.get('sample', 0)),
+						'grad_norm': sample.get('grad_norm'),
+						'cross_entropy': sample.get('cross_entropy')
+					}
+					if current_t is not None:
+						entry['current_t'] = int(current_t)
+					f.write(json.dumps(entry) + "\n")
+		except Exception as e:
+			print(f"[DeepCache DPS Warning] Failed to log sample metrics: {e}")
 	
 	def reset_cache(self):
 		"""DeepCache 캐시 초기화"""

@@ -8,6 +8,7 @@ from diffusion.transformer.openai import ModelMeanType, ModelVarType, LossType
 import torch.nn.functional as F
 import torchvision.transforms as T
 import torch.nn as nn
+import json
 
 # === UViT용 SDE/ScoreModel/샘플 step 함수 ===
 import torch
@@ -464,6 +465,16 @@ class DPSGuidance(BaseGuidance):
         self.early_exit_layer = getattr(args, 'early_exit_layer', None)
         self.use_time_based_early_exit = getattr(args, 'use_time_based_early_exit', False)
         self.time_early_exit_mapping = getattr(args, 'time_early_exit_mapping', None)
+
+        # Layer routing (test-time, gradient gating)
+        self.layer_routing_cfg = getattr(args, "layer_routing", None)
+        if isinstance(self.layer_routing_cfg, str):
+            try:
+                self.layer_routing_cfg = json.loads(self.layer_routing_cfg)
+            except Exception:
+                print("[layer-routing] failed to parse layer_routing string; disabling")
+                self.layer_routing_cfg = None
+        self.ablate_layer_routing = getattr(args, "ablate_layer_routing", False)
         
         # diffusion 인스턴스가 넘어오면 그 속성 사용 (UViT 샘플러 지원)
         if diffusion is not None:
@@ -684,37 +695,80 @@ class DPSGuidance(BaseGuidance):
                 return x_next
 
         elif model_type in ['transformer']:
-            # 기존 DiT step 함수 (기존 코드)
-            # 타겟 클래스 사용 (class_labels가 None이면 args.target 사용)
-            if class_labels is not None:
-                target_class = class_labels[0].item() if len(class_labels) > 0 else int(self.args.target)
+            # DiT는 항상 unconditional로만 호출 (CFG/cond 사용 안 함)
+            batch_size = x.shape[0]
+            if class_labels is not None and len(class_labels) > 0:
+                target_class = class_labels[0].item()
             else:
                 target_class = int(self.args.target)
-            
-            # 1. Predict x0 from current x_t using the diffusion model
+            uncond_id = getattr(model.y_embedder, "num_classes", None)
+            if uncond_id is None:
+                # y_embedder에 num_classes가 없을 때는 임베딩 테이블 마지막 인덱스를 드롭 토큰으로 사용
+                uncond_id = model.y_embedder.embedding_table.weight.shape[0] - 1
+            y_uncond = th.full((batch_size,), uncond_id, device=x.device, dtype=th.long)
+
+            # 1. Predict x0 from current x_t using the diffusion model (unconditional)
+            def model_fn(x_in, t_in):
+
+                return model(x_in, t_in, y=y_uncond)
+
+            # alpha 스케줄 준비: 전달되지 않았다면 diffusion 스케줄에서 직접 조회
+            if alpha_prod_ts is None or alpha_prod_t_prevs is None:
+                t_idx = t[0].item() if isinstance(t, th.Tensor) else int(t)
+                alpha_prod_t = th.tensor(self.alphas_cumprod[t_idx], device=x.device, dtype=x.dtype)
+                alpha_prod_t_prev = th.tensor(self.alphas_cumprod_prev[t_idx], device=x.device, dtype=x.dtype)
+            else:
+                alpha_prod_t = alpha_prod_ts[t]
+                alpha_prod_t_prev = alpha_prod_t_prevs[t]
+
             out = self.diffusion_obj.p_sample(
-                model.forward_with_cfg, 
-                x.float(), 
-                t, 
-                clip_denoised=False, 
-                model_kwargs=dict(y=th.tensor([1000], device=x.device, dtype=th.long), cfg_scale=cfg_scale)
+                model_fn,
+                x.float(),
+                t,
+                clip_denoised=False
             )
             pred_xstart = out["pred_xstart"]
             
             # 2. Decode to image space for guidance
             z0_decoded = self.vae.decode(pred_xstart / 0.18215, return_dict=False)[0]
             
-            # 3. Compute gradient w.r.t. z_t (current latent)
-            grad_z_t = self._compute_gradient_wrt_z_t(
-                x, pred_xstart, z0_decoded, target_class, t, **kwargs
+            # 3. Compute gradient w.r.t. z_t (current latent), optionally with layer routing
+            use_layer_routing = (
+                getattr(self, "layer_routing_cfg", None)
+                and self.layer_routing_cfg.get("enabled", False)
+                and not getattr(self, "ablate_layer_routing", False)
             )
+
+            if guidance_scale is None:
+                guidance_scale = getattr(self.args, "guidance_strength", 0.0)
+
+            if use_layer_routing:
+                t_idx = t[0].item() if isinstance(t, th.Tensor) else int(t)
+                active_blocks, route_strength = self._layer_routing_active(t_idx)
+                if len(active_blocks) == 0 or route_strength == 0.0:
+                    grad_z_t = th.zeros_like(x)
+                else:
+                    grad_z_t = self._compute_layer_routing_grad(
+                        z_t=x,
+                        t=t,
+                        model=model,
+                        y_uncond=y_uncond,
+                        active_blocks=active_blocks,
+                        target_class=target_class,
+                    )
+                    guidance_scale = guidance_scale * route_strength
+            else:
+                grad_z_t = self._compute_gradient_wrt_z_t(
+                        x, pred_xstart, z0_decoded, target_class, t, 
+                        model=model, y_uncond=y_uncond, **kwargs
+                )
             
             # 4. Apply DPS update rule according to the paper
             eps = self.diffusion_obj._predict_eps_from_xstart(x, t, pred_xstart)
             
             # Get diffusion parameters
-            alpha_t = alpha_prod_ts[t]
-            alpha_prev = alpha_prod_t_prevs[t]
+            alpha_t = alpha_prod_t
+            alpha_prev = alpha_prod_t_prev
             
             # DPS 논문의 정확한 수식 구현
             # x_{t-1} = μ(x_t, t) + Σ(x_t, t) * ∇_{x_t} log p(y|x_0)
@@ -738,7 +792,8 @@ class DPSGuidance(BaseGuidance):
                 
                 # 대신 DPS 논문에서 제안하는 방법 사용
                 # posterior variance 대신 guidance scale 사용
-                guidance_scale = 1.0
+                if guidance_scale is None:
+                    guidance_scale = getattr(self.args, "guidance_strength", 0.0)
                 
                 # Gradient normalization for numerical stability
                 grad_norm = grad_z_t.flatten(1).norm(p=2, dim=1).view(-1, 1, 1, 1)
@@ -826,28 +881,45 @@ class DPSGuidance(BaseGuidance):
     def _compute_gradient_wrt_z_t(
         self, 
         z_t: th.Tensor,  # Current latent z_t
-        pred_xstart: th.Tensor,  # Predicted z_0
-        z0_decoded: th.Tensor,  # Decoded image
+        pred_xstart: th.Tensor,  # Predicted z_0 (for reference, not used in gradient computation)
+        z0_decoded: th.Tensor,  # Decoded image (for reference, not used in gradient computation)
         target_class: int,
         t: th.Tensor,
+        model=None,
+        y_uncond=None,
         **kwargs
     ) -> th.Tensor:
         """
-        DPS 논문의 정확한 gradient 계산
-        ∇_{z_t} log p(c|z_0) = ∇_{z_0} log p(c|z_0) * ∂z_0/∂z_t
+        Compute ∇_{z_t} log p(c|z_0) by computing the full gradient path through z_t.
         
-        DDIM에서: z_0 = (z_t - √(1-α_t) * ε) / √(α_t)
-        따라서: ∂z_0/∂z_t = 1/√(α_t)
+        This is the correct implementation that computes gradient w.r.t. z_t,
+        unlike the previous version that only computed ∇_{z0}.
         """
         try:
-            # 1. pred_xstart (latent)에 requires_grad 설정 및 leaf tensor 보장 (항상 한 줄로 강제)
-            pred_xstart_new = pred_xstart.to(dtype=th.float32).detach().clone().requires_grad_(True)
-
-            # 2. pred_xstart → z0_decoded (VAE decode)
+            # 1. z_t에 requires_grad 설정 (전체 경로를 통해 gradient 계산)
+            z_req = z_t.detach().clone().requires_grad_(True)
+            
+            # 2. z_t에서 pred_xstart 계산 (model 필요)
+            if model is None or y_uncond is None:
+                # Fallback: 기존 방식 사용 (하지만 여전히 잘못됨)
+                # 이 경우는 호출자가 model을 전달하지 않은 경우
+                pred_xstart_new = pred_xstart.to(dtype=th.float32).detach().clone().requires_grad_(True)
+                z0_decoded_new = self.vae.decode(pred_xstart_new / 0.18215, return_dict=False)[0]
+            else:
+                # 올바른 방법: z_t에서 시작해서 전체 경로를 통해 계산
+                def model_fn(x_in, t_in):
+                    return model(x_in, t_in, y=y_uncond)
+                
+                out = self.diffusion_obj.p_mean_variance(
+                    model_fn,
+                    z_req,
+                    t,
+                    clip_denoised=False,
+                )
+                pred_xstart_new = out["pred_xstart"]
             z0_decoded_new = self.vae.decode(pred_xstart_new / 0.18215, return_dict=False)[0]
 
-            # 3. classifier, log_prob, loss 계산
-            # 전체 구조에 맞게 정확히 classifier 추출
+            # 3. classifier, log_prob 계산
             classifier = None
             if hasattr(self, 'guider') and hasattr(self.guider, 'get_guidance'):
                 get_guidance = self.guider.get_guidance
@@ -858,14 +930,10 @@ class DPSGuidance(BaseGuidance):
             if classifier is None:
                 raise RuntimeError('No classifier found for guidance gradient computation.')
 
-            # classifier가 nn.Module이면 직접 호출
             logits = classifier(z0_decoded_new)
-            # HuggingfaceClassifier/torchvision 모두 log_prob 반환
             if logits.ndim == 1:
-                # 이미 log_prob (selected)만 반환하는 구조
                 selected_log_probs = logits
             else:
-                # logits에서 softmax-log, target 인덱싱
                 probs = th.nn.functional.softmax(logits, dim=1)
                 log_probs = th.log(probs)
                 batch_size = z0_decoded_new.shape[0]
@@ -874,24 +942,114 @@ class DPSGuidance(BaseGuidance):
                 else:
                     selected_log_probs = th.cat([log_probs[range(batch_size), _] for _ in target_class], dim=0)
 
-            # 4. log probability의 합에 대해 autograd.grad로 gradient 계산
+            # 4. ∇_{z_t} logp 계산 (올바른 방법)
             log_prob_sum = selected_log_probs.sum()
-            grad_z0 = th.autograd.grad(
+            grad_z_t = th.autograd.grad(
                 outputs=log_prob_sum,
-                inputs=pred_xstart_new,
+                inputs=z_req,
                 retain_graph=False,
-                allow_unused=True
+                create_graph=False,
+                allow_unused=False
             )[0]
 
-            # 5. 불필요한 변수/그래프 해제 및 메모리 정리
-            del pred_xstart_new, z0_decoded_new, log_prob_sum
+            # 5. 정리
+            del z_req, pred_xstart_new, z0_decoded_new, log_prob_sum
             th.cuda.empty_cache()
-            return grad_z0
+            
+            return grad_z_t
         except Exception as e:
             print(f'Gradient computation failed: {e}')
             th.cuda.empty_cache()
             # fallback: 입력 pred_xstart와 같은 shape의 0 tensor 반환
             return th.zeros_like(pred_xstart)
+
+    def _layer_routing_active(self, t_idx: int):
+        """
+        Return (active_blocks, strength) for current timestep index.
+        """
+        cfg = getattr(self, "layer_routing_cfg", None)
+        if not cfg or not cfg.get("enabled", False):
+            return [], 0.0
+        schedule = cfg.get("schedule", [])
+        for item in schedule:
+            t_min = item.get("t_min", -1)
+            t_max = item.get("t_max", -1)
+            if t_min <= t_idx <= t_max:
+                return item.get("blocks", []), item.get("strength", 1.0)
+        return [], 0.0
+
+    def _find_classifier(self):
+        """
+        Reuse existing classifier lookup used elsewhere in DPS.
+        """
+        classifier = None
+        if hasattr(self, 'guider') and hasattr(self.guider, 'get_guidance'):
+            get_guidance = self.guider.get_guidance
+            if hasattr(get_guidance, 'func') and hasattr(get_guidance.func, '__self__'):
+                guider_obj = get_guidance.func.__self__
+                if hasattr(guider_obj, 'classifier'):
+                    classifier = guider_obj.classifier
+        return classifier
+
+    def _compute_layer_routing_grad(
+        self,
+        z_t: th.Tensor,
+        t: th.Tensor,
+        model: th.nn.Module,
+        y_uncond: th.Tensor,
+        active_blocks,
+        target_class: int,
+    ):
+        """
+        Compute grad w.r.t z_t using gated residual detach (only active_blocks contribute).
+        Important: use diffusion to obtain pred_xstart (x0) from eps, then decode x0.
+        """
+        try:
+            z_req = z_t.detach().clone().requires_grad_(True)
+            # gated forward (only for guidance) wrapped as model_fn for diffusion
+            def model_fn_gated(x_in, t_in):
+                return model.forward_with_residual_detach(x_in, t_in, y_uncond, active_blocks)
+
+            # Use diffusion to compute pred_xstart (x0) from gated eps
+            out = self.diffusion_obj.p_mean_variance(
+                model_fn_gated,
+                z_req,
+                t,
+                clip_denoised=False,
+            )
+            pred_xstart = out["pred_xstart"]
+
+            # If model predicts mean+variance, pred_xstart is already C not 2C
+            z0_decoded = self.vae.decode(pred_xstart / 0.18215, return_dict=False)[0]
+
+            classifier = self._find_classifier()
+            if classifier is None:
+                raise RuntimeError('No classifier found for layer routing guidance.')
+
+            logits = classifier(z0_decoded)
+            if logits.ndim == 1:
+                # 이미 선택된 클래스의 logit 또는 log-prob로 가정
+                logp = logits.sum()
+            else:
+                probs = th.nn.functional.softmax(logits, dim=1)
+                logp = th.log(probs[range(probs.shape[0]), int(target_class)]).sum()
+
+            grad = th.autograd.grad(
+                outputs=logp,
+                inputs=z_req,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=False
+            )[0]
+
+            # Logging
+            gnorm = grad.flatten(1).norm(p=2, dim=1).mean().item()
+            t_val = t[0].item() if isinstance(t, th.Tensor) and t.numel() > 0 else t
+            print(f"[layer-routing] t={t_val} active={sorted(active_blocks)} grad_norm={gnorm:.3e}")
+            return grad
+        except Exception as e:
+            print(f"[layer-routing] grad computation failed: {e}")
+            return th.zeros_like(z_t)
 
     def _compute_gradient_wrt_x0_uvit(
         self,

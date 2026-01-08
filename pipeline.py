@@ -25,8 +25,19 @@ class BasePipeline(object):
         self.bon_rate = args.bon_rate
         self.batch_size = args.eval_batch_size
         
-        # 初始化 logp_guider，如果没有提供则使用默认的 guider
         self.bon_guider = bon_guider if bon_guider is not None else self.guider
+        
+        # sampler에 포함된 VAE를 guidance 객체에 공유하여 DiT/DPS에서 decode 사용 가능하도록 설정
+        if hasattr(network, 'vae') and getattr(network, 'vae', None) is not None:
+            if hasattr(self.guider, 'vae'):
+                self.guider.vae = network.vae
+            else:
+                setattr(self.guider, 'vae', network.vae)
+            if self.bon_guider is not None and self.bon_guider is not self.guider:
+                if hasattr(self.bon_guider, 'vae'):
+                    self.bon_guider.vae = network.vae
+                else:
+                    setattr(self.bon_guider, 'vae', network.vae)
         
     @abstractmethod
     def sample(self, sample_size: int):

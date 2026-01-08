@@ -13,7 +13,7 @@ clip_x0=True
 seed=40
 logging_dir='logs'
 per_sample_batch_size=128
-num_samples=30
+num_samples=16
 logging_resolution=512
 guidance_name='dps'
 eval_batch_size=512
@@ -30,7 +30,7 @@ guidance_scale=2.0
 # Early exit 설정
 
 use_early_exit=True
-early_exit_layer=5  # decode layer의 6번째 layer에서 early exit (총 6개 decode layer 중 6번째)
+early_exit_layer=6  # decode layer의 6번째 layer에서 early exit (총 6개 decode layer 중 6번째)
 
 # 실행 시간 측정 시작
 start_time=$(date +%s.%N)

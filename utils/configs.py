@@ -73,6 +73,15 @@ class Arguments:
     guidance_scale: float = field(default=1.0)
     start_gradient: int = field(default=50)
     
+    # time-varying guidance
+    guidance_early: Optional[float] = field(default=None)
+    guidance_late: Optional[float] = field(default=None)
+    guidance_transition_step: Optional[int] = field(default=None)
+    
+    # multi-step guidance
+    guidance_scale_schedule: Optional[str] = field(default=None)
+    guidance_transition_steps: Optional[str] = field(default=None)
+    
     # early exit related
     use_early_exit: bool = field(default=False)
     early_exit_layer: Optional[int] = field(default=None)
@@ -119,4 +128,16 @@ class Arguments:
     # bon
     bon_rate: float = field(default=1)
     bon_guidance: str = field(default=None)
+
+    # Cosine-based dynamic boost (optional)
+    dynamic_cosine_boost: bool = field(default=False)
+    dynamic_boost_check_step: int = field(default=20)      # step to check cosine
+    dynamic_boost_start: int = field(default=10)           # apply boost in [start, end]
+    dynamic_boost_end: int = field(default=20)
+    dynamic_boost_scale: float = field(default=3.0)        # guidance strength during boost
+    dynamic_boost_cos_threshold: float = field(default=-0.05)
+
+    # layer-routed guidance (inference-time only); parsed later from string/json
+    layer_routing: Optional[str] = field(default=None)  # e.g., '{"enabled": true, "mode": "hard_detach", "schedule": [...]}'
+    ablate_layer_routing: bool = field(default=False)
 

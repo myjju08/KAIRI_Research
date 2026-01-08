@@ -18,3 +18,5 @@ nohup.out
 nohup.out
 models/*.pt
 models/*.pth
+data/*.tar.gz
+fast-DiT/
